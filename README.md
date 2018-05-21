@@ -151,13 +151,13 @@ del data # closes mmap file handle
 vol.unlink_shared_memory() # delete the shared memory associated with this cloudvolume
 vol.shared_memory_id # get/set the shared memory location for this instance
 
-# Shared Memory Output
-vol = CloudVolume(..., output_to_shared_memory=True)
-vol = CloudVolume(..., output_to_shared_memory='my-shared-memory-location')
-data = vol[:] # data now is a shared memory buffer
+# Shared Memory Output (can be used by other processes)
+vol = CloudVolume(...)
+# data backed by a shared memory buffer
+# location is optional (defaults to vol.shared_memory_id)
+data = vol.download_to_shared_memory(np.s_[:], location='some-example') 
 vol.unlink_shared_memory() # delete the shared memory associated with this cloudvolume
-vol.shared_memory_id # get/set the shared memory location for this instance
-vol.output_to_shared_memory = True/False # Turn this feature on/off
+vol.shared_memory_id # get/set the default shared memory location for this instance
 
 # Shared Memory Upload
 vol = CloudVolume(...)
