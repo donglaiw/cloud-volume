@@ -24,7 +24,7 @@ class ThreadedQueue(object):
 
     self.with_progress = progress
 
-    self.start_threads(n_threads)
+    # self.start_threads(n_threads)
 
   @property
   def pending(self):
@@ -46,24 +46,28 @@ class ThreadedQueue(object):
 
     Returns: self
     """
-    self._inserted += 1
-    self._queue.put(fn, block=True)
+    interface = self._initialize_interface()
+    fn = partial(fn, interface)
+    fn()
+    # self._inserted += 1
+    # self._queue.put(fn, block=True)
     return self
 
   def start_threads(self, n_threads):
     """
-    Terminate existing threads and create a 
+    Terminate existing threads and create a
     new set if the thread number doesn't match
     the desired number.
 
-    Required: 
+    Required:
       n_threads: (int) number of threads to spawn
 
     Returns: self
     """
+    return self
     if n_threads == len(self._threads):
       return self
-    
+
     # Terminate all previous tasks with the existing
     # event object, then create a new one for the next
     # generation of threads. The old object will hang
@@ -76,7 +80,7 @@ class ThreadedQueue(object):
 
     for _ in range(n_threads):
       worker = threading.Thread(
-        target=self._consume_queue, 
+        target=self._consume_queue,
         args=(self._terminate,)
       )
       worker.daemon = True
@@ -106,9 +110,9 @@ class ThreadedQueue(object):
     you pass into the self._queue will get it as the first parameter.
 
     e.g. an implementation in a subclass.
- 
+
         def _initialize_interface(self):
-          return HTTPConnection()   
+          return HTTPConnection()
 
         def other_function(self):
           def threaded_file_read(connection):
@@ -131,12 +135,13 @@ class ThreadedQueue(object):
     is a function that performs some kind of network IO or otherwise
     benefits from threading and is independent.
 
-    terminate_evt is automatically passed in on thread creation and 
+    terminate_evt is automatically passed in on thread creation and
     is a common event for this generation of threads. The threads
     will terminate when the event is set and the queue burns down.
 
     Returns: void
     """
+    return self
     interface = self._initialize_interface()
 
     while not terminate_evt.is_set():
@@ -158,7 +163,7 @@ class ThreadedQueue(object):
     """
     The actual task execution in each thread. This
     is broken out so that exceptions can be caught
-    in derived classes and allow them to manipulate 
+    in derived classes and allow them to manipulate
     the errant task, e.g. putting it back in the queue
     for a retry.
 
@@ -183,7 +188,7 @@ class ThreadedQueue(object):
 
   def _check_errors(self):
     try:
-      err = self._error_queue.get(block=False) 
+      err = self._error_queue.get(block=False)
       self._error_queue.task_done()
       self.kill_threads()
       raise err
@@ -200,11 +205,12 @@ class ThreadedQueue(object):
     Optional:
       progress: (bool or str) show a tqdm progress bar optionally
         with a description if a string is provided
-    
+
     Returns: self (for chaining)
 
     Raises: The first exception recieved from threads
     """
+    return self
     if not len(self._threads):
       return self
 
@@ -225,10 +231,10 @@ class ThreadedQueue(object):
         self._check_errors()
         time.sleep(0.1)
 
-      # Wait until all tasks in the queue are 
+      # Wait until all tasks in the queue are
       # fully processed. queue.task_done must be
       # called for each task.
-      self._queue.join() 
+      self._queue.join()
       self._check_errors()
 
       final = self._inserted - last
@@ -241,10 +247,12 @@ class ThreadedQueue(object):
     return self
 
   def __del__(self):
+    return self
     self.wait() # if no threads were set the queue is always empty
     self.kill_threads()
 
   def __enter__(self):
+    return self
     if self.__class__ is ThreadedQueue and self._n_threads == 0:
       raise ValueError("Using 0 threads in base class ThreadedQueue with statement will never exit.")
 
@@ -252,5 +260,6 @@ class ThreadedQueue(object):
     return self
 
   def __exit__(self, exception_type, exception_value, traceback):
+    return self
     self.wait(progress=self.with_progress)
     self.kill_threads()
