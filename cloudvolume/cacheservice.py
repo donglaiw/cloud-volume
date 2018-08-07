@@ -15,12 +15,13 @@ class CacheService(object):
   def __init__(self, path_or_bool, vol):
     self.vol = vol
     self.enabled = path_or_bool # on/off or path (on)
+    self.compress = vol.cache_compress
 
     self.initialize()
 
   def initialize(self):
     if not self.enabled:
-      return 
+      return
 
     if not os.path.exists(self.path):
         mkdir(self.path)
@@ -32,13 +33,13 @@ class CacheService(object):
   def path(self):
     if type(self.enabled) is not str:
       path = self.vol.path
-      return toabs(os.path.join(CLOUD_VOLUME_DIR, 'cache', 
+      return toabs(os.path.join(CLOUD_VOLUME_DIR, 'cache',
         path.protocol, path.bucket.replace('/', ''), path.intermediate_path,
         path.dataset, path.layer
       ))
     else:
       return toabs(self.enabled)
-  
+
   def num_files(self, all_mips=False):
     def size(mip):
       path_at_mip = os.path.join(self.path, self.vol.mip_key(mip))
@@ -60,8 +61,8 @@ class CacheService(object):
       if not os.path.exists(path_at_mip):
         return 0
 
-      return sum( 
-        ( os.path.getsize(os.path.join(path_at_mip, filename)) for filename in os.listdir(path_at_mip) ) 
+      return sum(
+        ( os.path.getsize(os.path.join(path_at_mip, filename)) for filename in os.listdir(path_at_mip) )
       )
 
     if all_mips:
@@ -103,8 +104,8 @@ class CacheService(object):
 
     Optional:
       preserve (Bbox: None): Preserve chunks located partially
-        or entirely within this bounding box. 
-    
+        or entirely within this bounding box.
+
     Return: void
     """
     if not os.path.exists(self.path):
@@ -129,29 +130,29 @@ class CacheService(object):
 
   # flush_cache_region seems like it could be tacked on
   # as a flag to delete, but there are reasons not
-  # to do that. 
-  # 1) reduces the risks of disasterous programming errors. 
+  # to do that.
+  # 1) reduces the risks of disasterous programming errors.
   # 2) doesn't require chunk alignment
   # 3) processes potentially multiple mips at once
 
   def flush_region(self, region, mips=None):
     """
-    Delete a cache region at one or more mip levels 
+    Delete a cache region at one or more mip levels
     bounded by a Bbox for this dataset. Bbox coordinates
     should be specified in mip 0 coordinates.
 
     Required:
       region (Bbox): Delete cached chunks located partially
-        or entirely within this bounding box. 
+        or entirely within this bounding box.
     Optional:
       mip (int: None): Flush the cache from this mip. Region
         is in global coordinates.
-    
+
     Return: void
     """
     if not os.path.exists(self.path):
       return
-    
+
     if type(region) in (list, tuple):
       region = generate_slices(region, self.vol.bounds.minpt, self.vol.bounds.maxpt, bounded=False)
       region = Bbox.from_slices(region)
@@ -186,7 +187,7 @@ class CacheService(object):
 
     mismatch_error = ValueError("""
       Data layer info file differs from cache. Please check whether this
-      change invalidates your cache. 
+      change invalidates your cache.
 
       If VALID do one of:
       1) Manually delete the cache (see location below)
@@ -194,9 +195,9 @@ class CacheService(object):
         vol = CloudVolume(..., cache=False) # refreshes from source
         vol.cache = True
         vol.commit_info() # writes to disk
-      If INVALID do one of: 
-      1) Delete the cache manually (see cache location below) 
-      2) Instantiate as follows: 
+      If INVALID do one of:
+      1) Delete the cache manually (see cache location below)
+      2) Instantiate as follows:
         vol = CloudVolume(..., cache=False) # refreshes info from source
         vol.flush_cache() # deletes cache
         vol.cache = True
@@ -206,8 +207,8 @@ class CacheService(object):
       SOURCE: {source}
       CACHE LOCATION: {path}
       """.format(
-      cache=cache_info, 
-      source=fresh_info, 
+      cache=cache_info,
+      source=fresh_info,
       path=self.path
     ))
 
@@ -277,10 +278,10 @@ class CacheService(object):
     already_have = requested.intersection(set(filenames))
     to_download = requested.difference(already_have)
 
-    download_paths = [ os.path.join(basepathmap[fname], fname) for fname in to_download ]    
+    download_paths = [ os.path.join(basepathmap[fname], fname) for fname in to_download ]
 
     return { 'local': already_have, 'remote': download_paths }
-    
+
 
 
 

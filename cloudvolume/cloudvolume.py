@@ -21,10 +21,10 @@ from .secrets import boss_credentials, CLOUD_VOLUME_DIR
 
 from . import lib, chunks
 from .cacheservice import CacheService
-from .lib import ( 
-  toabs, colorize, red, yellow, 
-  mkdir, clamp, xyzrange, Vec, 
-  Bbox, min2, max2, check_bounds, 
+from .lib import (
+  toabs, colorize, red, yellow,
+  mkdir, clamp, xyzrange, Vec,
+  Bbox, min2, max2, check_bounds,
   jsonify, generate_slices
 )
 from .meshservice import PrecomputedMeshService
@@ -51,8 +51,8 @@ class CloudVolume(object):
   datasets on supported hosts like Google Storage, S3, and local Filesystems.
 
   Uploading to and downloading from a neuroglancer dataset requires specifying
-  an `info` file located at the root of a data layer. Amongst other things, 
-  the bounds of the volume are described in the info file via a 3D "offset" 
+  an `info` file located at the root of a data layer. Amongst other things,
+  the bounds of the volume are described in the info file via a 3D "offset"
   and 3D "shape" in voxels.
 
   Required:
@@ -73,14 +73,14 @@ class CloudVolume(object):
     fill_missing: (bool) If a file inside volume bounds is unable to be fetched:
         True: Use a block of zeros
         False: Throw an error
-    cache: (bool or str) Store downloaded and uploaded files in a cache on disk 
-      and preferentially read from it before redownloading. 
+    cache: (bool or str) Store downloaded and uploaded files in a cache on disk
+      and preferentially read from it before redownloading.
         - falsey value: no caching will occur.
         - True: cache will be located in a standard location.
         - non-empty string: cache is located at this file path
     cdn_cache: (int, bool, or str) Sets the Cache-Control HTTP header on uploaded image files.
       Most cloud providers perform some kind of caching. As of this writing, Google defaults to
-      3600 seconds. Most of the time you'll want to go with the default. 
+      3600 seconds. Most of the time you'll want to go with the default.
       - int: number of seconds for cache to be considered fresh (max-age)
       - bool: True: max-age=3600, False: no-cache
       - str: set the header manually
@@ -93,24 +93,25 @@ class CloudVolume(object):
       the default.
     provenance: (string, dict, or object) in lieu of fetching a neuroglancer provenance file, use this provided one.
             This is useful when doing multiprocessing.
-    progress: (bool) Show tqdm progress bars. 
+    progress: (bool) Show tqdm progress bars.
         Defaults True in interactive python, False in script execution mode.
-    compress: (bool, str, None) pick which compression method to use. 
+    compress: (bool, str, None) pick which compression method to use.
       None: (default) Use the pre-programmed recommendation (e.g. gzip raw arrays and compressed_segmentation)
       bool: True=gzip, False=no compression, Overrides defaults
-      str: 'gzip', extension so that we can add additional methods in the future like lz4 or zstd. 
+      str: 'gzip', extension so that we can add additional methods in the future like lz4 or zstd.
         '' means no compression (same as False).
     non_aligned_writes: (bool) Enable non-aligned writes. Not multiprocessing safe without careful design.
       When not enabled, a ValueError is thrown for non-aligned writes.
   """
-  def __init__(self, cloudpath, mip=0, bounded=True, autocrop=False, fill_missing=False, 
-      cache=False, cdn_cache=True, progress=INTERACTIVE, info=None, provenance=None, 
-      compress=None, non_aligned_writes=False, parallel=1, output_to_shared_memory=False):
+  def __init__(self, cloudpath, mip=0, bounded=True, autocrop=False, fill_missing=False,
+      cache=False, cdn_cache=True, progress=INTERACTIVE, info=None, provenance=None,
+      compress=None, non_aligned_writes=False, parallel=1, output_to_shared_memory=False, cache_compress=None):
 
     self.autocrop = bool(autocrop)
     self.bounded = bool(bounded)
     self.cdn_cache = cdn_cache
     self.compress = compress
+    self.cache_compress = compress if cache_compress is None else cache_compress
     self.fill_missing = bool(fill_missing)
     self.mip = int(mip)
     self.non_aligned_writes = bool(non_aligned_writes)
@@ -128,7 +129,7 @@ class CloudVolume(object):
       self.parallel = mp.cpu_count() if parallel == True else 1
     else:
       self.parallel = int(parallel)
-    
+
     if self.parallel <= 0:
       raise ValueError('Number of processes must be >= 1. Got: ' + str(self.parallel))
 
@@ -154,9 +155,9 @@ class CloudVolume(object):
       raise Exception("MIP {} has not been generated.".format(self.mip))
 
   def init_submodules(self, cache):
-    self.cache = CacheService(cache, weakref.proxy(self)) 
+    self.cache = CacheService(cache, weakref.proxy(self))
     self.mesh = PrecomputedMeshService(weakref.proxy(self))
-    self.skeleton = PrecomputedSkeletonService(weakref.proxy(self)) 
+    self.skeleton = PrecomputedSkeletonService(weakref.proxy(self))
 
   def generate_shared_memory_location(self):
     return 'cloudvolume-shm-' + str(uuid.uuid4())
@@ -168,7 +169,7 @@ class CloudVolume(object):
   def _storage(self):
     if self.path.protocol == 'boss':
       return None
-    
+
     try:
       return SimpleStorage(self.layer_cloudpath)
     except:
@@ -177,11 +178,11 @@ class CloudVolume(object):
             self.path
         ))
       raise
-      
+
   @classmethod
-  def create_new_info(cls, 
-    num_channels, layer_type, data_type, encoding, 
-    resolution, voxel_offset, volume_size, 
+  def create_new_info(cls,
+    num_channels, layer_type, data_type, encoding,
+    resolution, voxel_offset, volume_size,
     mesh=None, skeletons=None, chunk_size=(64,64,64),
     compressed_segmentation_block_size=(8,8,8)
   ):
@@ -189,14 +190,14 @@ class CloudVolume(object):
     Used for creating new neuroglancer info files.
 
     Required:
-      num_channels: (int) 1 for grayscale, 3 for RGB 
+      num_channels: (int) 1 for grayscale, 3 for RGB
       layer_type: (str) typically "image" or "segmentation"
       data_type: (str) e.g. "uint8", "uint16", "uint32", "float32"
       encoding: (str) "raw" for binaries like numpy arrays, "jpeg"
       resolution: int (x,y,z), x,y,z voxel dimensions in nanometers
       voxel_offset: int (x,y,z), beginning of dataset in positive cartesian space
       volume_size: int (x,y,z), extent of dataset in cartesian space from voxel_offset
-    
+
     Optional:
       mesh: (str) name of mesh directory, typically "mesh"
       skeletons: (str) name of skeletons directory, typically "skeletons"
@@ -227,7 +228,7 @@ class CloudVolume(object):
       info['mesh'] = 'mesh' if not isinstance(mesh, string_types) else mesh
 
     if skeletons:
-      info['skeletons'] = 'skeletons' if not isinstance(mesh, string_types) else mesh      
+      info['skeletons'] = 'skeletons' if not isinstance(mesh, string_types) else mesh
 
     return info
 
@@ -245,7 +246,7 @@ class CloudVolume(object):
   def _fetch_info(self):
     if self.path.protocol == "boss":
       return self.fetch_boss_info()
-    
+
     with self._storage as stor:
       info = stor.get_json('info')
 
@@ -259,7 +260,7 @@ class CloudVolume(object):
 
   def fetch_boss_info(self):
     experiment = ExperimentResource(
-      name=self.path.dataset, 
+      name=self.path.dataset,
       collection_name=self.path.bucket
     )
     rmt = BossRemote(boss_credentials)
@@ -269,7 +270,7 @@ class CloudVolume(object):
     coord_frame = rmt.get_project(coord_frame)
 
     channel = ChannelResource(self.path.layer, self.path.bucket, self.path.dataset)
-    channel = rmt.get_project(channel)    
+    channel = rmt.get_project(channel)
 
     unit_factors = {
       'nanometers': 1,
@@ -288,7 +289,7 @@ class CloudVolume(object):
       (cf.x_start, cf.y_start, cf.z_start),
       (cf.x_stop, cf.y_stop, cf.z_stop)
     )
-    bbox.maxpt = bbox.maxpt 
+    bbox.maxpt = bbox.maxpt
 
     layer_type = 'unknown'
     if 'type' in channel.raw:
@@ -307,7 +308,7 @@ class CloudVolume(object):
     each_factor = Vec(2,2,1)
     if experiment.hierarchy_method == 'isotropic':
       each_factor = Vec(2,2,2)
-    
+
     factor = each_factor.clone()
     for mip in range(1, experiment.num_hierarchy_levels):
       self.add_scale(factor, info=info)
@@ -321,13 +322,13 @@ class CloudVolume(object):
 
   def commit_info(self):
     if self.path.protocol == 'boss':
-      return self 
+      return self
 
     for scale in self.scales:
       if scale['encoding'] == 'compressed_segmentation':
         if 'compressed_segmentation_block_size' not in scale.keys():
           raise KeyError("""
-            'compressed_segmentation_block_size' must be set if 
+            'compressed_segmentation_block_size' must be set if
             compressed_segmentation is set as the encoding.
 
             A typical value for compressed_segmentation_block_size is (8,8,8)
@@ -338,15 +339,15 @@ class CloudVolume(object):
         elif self.dtype not in ('uint32', 'uint64'):
           raise ValueError("compressed_segmentation can only be used with uint32 and uint64 data types.")
 
-    infojson = jsonify(self.info, 
+    infojson = jsonify(self.info,
       sort_keys=True,
-      indent=2, 
+      indent=2,
       separators=(',', ': ')
     )
 
     with self._storage as stor:
-      stor.put_file('info', infojson, 
-        content_type='application/json', 
+      stor.put_file('info', infojson,
+        content_type='application/json',
         cache_control='no-cache'
       )
     self.cache.maybe_cache_info()
@@ -370,7 +371,7 @@ class CloudVolume(object):
       prov = json.loads(prov)
 
     provobj = DataLayerProvenance(**prov)
-    provobj.sources = provobj.sources or []  
+    provobj.sources = provobj.sources or []
     provobj.owners = provobj.owners or []
     provobj.processing = provobj.processing or []
     provobj.description = provobj.description or ""
@@ -389,8 +390,8 @@ class CloudVolume(object):
         try:
           provfile = json5.loads(provfile)
         except ValueError:
-          raise ValueError(red("""The provenance file could not be JSON decoded. 
-            Please reformat the provenance file before continuing. 
+          raise ValueError(red("""The provenance file could not be JSON decoded.
+            Please reformat the provenance file before continuing.
             Contents: {}""".format(provfile)))
       else:
         provfile = {
@@ -410,14 +411,14 @@ class CloudVolume(object):
 
     # hack to pretty print provenance files
     prov = json.loads(prov)
-    prov = jsonify(prov, 
+    prov = jsonify(prov,
       sort_keys=True,
-      indent=2, 
+      indent=2,
       separators=(',', ': ')
     )
 
     with self._storage as stor:
-      stor.put_file('provenance', prov, 
+      stor.put_file('provenance', prov,
         content_type='application/json',
         cache_control='no-cache',
       )
@@ -427,7 +428,7 @@ class CloudVolume(object):
   @property
   def dataset_name(self):
     return self.path.dataset
-  
+
   @property
   def layer(self):
     return self.path.layer
@@ -461,7 +462,7 @@ class CloudVolume(object):
 
   @property
   def shape(self):
-    """Returns Vec(x,y,z,channels) shape of the volume similar to numpy.""" 
+    """Returns Vec(x,y,z,channels) shape of the volume similar to numpy."""
     return self.mip_shape(self.mip)
 
   def mip_shape(self, mip):
@@ -470,7 +471,7 @@ class CloudVolume(object):
 
   @property
   def volume_size(self):
-    """Returns Vec(x,y,z) shape of the volume (i.e. shape - channels) similar to numpy.""" 
+    """Returns Vec(x,y,z) shape of the volume (i.e. shape - channels) similar to numpy."""
     return self.mip_volume_size(self.mip)
 
   def mip_volume_size(self, mip):
@@ -524,7 +525,7 @@ class CloudVolume(object):
   def mip_voxel_offset(self, mip):
     return Vec(*self.info['scales'][mip]['voxel_offset'])
 
-  @property 
+  @property
   def resolution(self):
     """Vec(x,y,z) dimensions of each voxel in nanometers"""
     return self.mip_resolution(self.mip)
@@ -645,8 +646,8 @@ class CloudVolume(object):
     if not info:
       info = self.info
 
-    # e.g. {"encoding": "raw", "chunk_sizes": [[64, 64, 64]], "key": "4_4_40", 
-    # "resolution": [4, 4, 40], "voxel_offset": [0, 0, 0], 
+    # e.g. {"encoding": "raw", "chunk_sizes": [[64, 64, 64]], "key": "4_4_40",
+    # "resolution": [4, 4, 40], "voxel_offset": [0, 0, 0],
     # "size": [2048, 2048, 256]}
     fullres = info['scales'][0]
 
@@ -654,9 +655,9 @@ class CloudVolume(object):
     # zooming out will slightly shift the data.
     # Imagine the offset is 10
     #    the mip 1 will have an offset of 5
-    #    the mip 2 will have an offset of 2 instead of 2.5 
+    #    the mip 2 will have an offset of 2 instead of 2.5
     #        meaning that it will be half a pixel to the left
-    
+
     chunk_size = lib.find_closest_divisor(fullres['chunk_sizes'][0], closest_to=[64,64,64])
 
     def downscale(size, roundingfn):
@@ -686,7 +687,7 @@ class CloudVolume(object):
         info['scales'][index] = newscale
         break
 
-    if not preexisting:    
+    if not preexisting:
       info['scales'].append(newscale)
 
     return newscale
@@ -708,14 +709,14 @@ class CloudVolume(object):
     channel_slice = slices.pop()
 
     minpt = Vec(*[ slc.start for slc in slices ])
-    maxpt = Vec(*[ slc.stop for slc in slices ]) 
+    maxpt = Vec(*[ slc.stop for slc in slices ])
     steps = Vec(*[ slc.step for slc in slices ])
 
     return Bbox(minpt, maxpt), steps, channel_slice
 
   def __realized_bbox(self, requested_bbox):
     """
-    The requested bbox might not be aligned to the underlying chunk grid 
+    The requested bbox might not be aligned to the underlying chunk grid
     or even outside the bounds of the dataset. Convert the request into
     a bbox representing something that can be actually downloaded.
 
@@ -729,7 +730,7 @@ class CloudVolume(object):
     Produce a summary of whether all the requested chunks exist.
 
     bbox_or_slices: accepts either a Bbox or a tuple of slices representing
-      the requested volume. 
+      the requested volume.
     Returns: { chunk_file_name: boolean, ... }
     """
     if type(bbox_or_slices) is Bbox:
@@ -748,7 +749,7 @@ class CloudVolume(object):
     Delete the files within the bounding box.
 
     bbox_or_slices: accepts either a Bbox or a tuple of slices representing
-      the requested volume. 
+      the requested volume.
     """
     if type(bbox_or_slices) is Bbox:
       requested_bbox = bbox_or_slices
@@ -775,7 +776,7 @@ class CloudVolume(object):
 
     if self.autocrop:
       requested_bbox = Bbox.intersection(requested_bbox, self.bounds)
-    
+
     if self.path.protocol != 'boss':
       return txrx.cutout(self, requested_bbox, steps, channel_slice, parallel=self.parallel,
         shared_memory_location=self.shared_memory_id, output_to_shared_memory=self.output_to_shared_memory)
@@ -784,23 +785,23 @@ class CloudVolume(object):
 
   def download_to_shared_memory(self, slices, location=None):
     """
-    Download images to a shared memory array. 
+    Download images to a shared memory array.
 
     https://github.com/seung-lab/cloud-volume/wiki/Advanced-Topic:-Shared-Memory
 
     tip: If you want to use slice notation, np.s_[...] will help in a pinch.
 
-    MEMORY LIFECYCLE WARNING: You are responsible for managing the lifecycle of the 
-      shared memory. CloudVolume will merely write to it, it will not unlink the 
-      memory automatically. To fully clear the shared memory you must unlink the 
+    MEMORY LIFECYCLE WARNING: You are responsible for managing the lifecycle of the
+      shared memory. CloudVolume will merely write to it, it will not unlink the
+      memory automatically. To fully clear the shared memory you must unlink the
       location and close any mmap file handles. You can use `cloudvolume.sharedmemory.unlink(...)`
-      to help you unlink the shared memory file or `vol.unlink_shared_memory()` if you do 
+      to help you unlink the shared memory file or `vol.unlink_shared_memory()` if you do
       not specify location (meaning the default instance location is used).
 
-    EXPERT MODE WARNING: If you aren't sure you need this function (e.g. to relieve 
-      memory pressure or improve performance in some way) you should use the ordinary 
-      download method of img = vol[:]. A typical use case is transferring arrays between 
-      different processes without making copies. For reference, this  feature was created 
+    EXPERT MODE WARNING: If you aren't sure you need this function (e.g. to relieve
+      memory pressure or improve performance in some way) you should use the ordinary
+      download method of img = vol[:]. A typical use case is transferring arrays between
+      different processes without making copies. For reference, this  feature was created
       for downloading a 62 GB array and working with it in Julia.
 
     Required:
@@ -808,10 +809,10 @@ class CloudVolume(object):
         if you have a 1024x1024x128 volume and you're uploading only a 512x512x64 corner
         touching the origin, your Bbox would be `Bbox( (0,0,0), (512,512,64) )`.
     Optional:
-      location: (str) Defaults to self.shared_memory_id. Shared memory location 
-        e.g. 'cloudvolume-shm-RANDOM-STRING' This typically corresponds to a file 
-        in `/dev/shm` or `/run/shm/`. It can also be a file if you're using that for mmap. 
-    
+      location: (str) Defaults to self.shared_memory_id. Shared memory location
+        e.g. 'cloudvolume-shm-RANDOM-STRING' This typically corresponds to a file
+        in `/dev/shm` or `/run/shm/`. It can also be a file if you're using that for mmap.
+
     Returns: void
     """
     if self.path.protocol == 'boss':
@@ -823,9 +824,9 @@ class CloudVolume(object):
 
     if self.autocrop:
       requested_bbox = Bbox.intersection(requested_bbox, self.bounds)
-    
+
     location = location or self.shared_memory_id
-    return txrx.cutout(self, requested_bbox, steps, channel_slice, parallel=self.parallel, 
+    return txrx.cutout(self, requested_bbox, steps, channel_slice, parallel=self.parallel,
       shared_memory_location=location, output_to_shared_memory=True)
 
   def flush_cache(self, preserve=None):
@@ -835,7 +836,7 @@ class CloudVolume(object):
 
   def _boss_cutout(self, requested_bbox, steps, channel_slice=slice(None)):
     bounds = Bbox.clamp(requested_bbox, self.bounds)
-    
+
     if bounds.volume() < 1:
       raise ValueError('Requested less than one pixel of volume. {}'.format(bounds))
 
@@ -846,10 +847,10 @@ class CloudVolume(object):
     layer_type = 'image' if self.layer_type == 'unknown' else self.layer_type
 
     chan = ChannelResource(
-      collection_name=self.path.bucket, 
-      experiment_name=self.path.dataset, 
+      collection_name=self.path.bucket,
+      experiment_name=self.path.dataset,
       name=self.path.layer, # Channel
-      type=layer_type, 
+      type=layer_type,
       datatype=self.dtype,
     )
 
@@ -865,7 +866,7 @@ class CloudVolume(object):
       return VolumeCutout.from_volume(self, cutout, bounds)
 
     # This section below covers the case where the requested volume is bigger
-    # than the dataset volume and the bounds guards have been switched 
+    # than the dataset volume and the bounds guards have been switched
     # off. This is useful for Marching Cubes where a 1px excess boundary
     # is needed.
     shape = list(requested_bbox.size3()) + [ cutout.shape[3] ]
@@ -893,7 +894,7 @@ class CloudVolume(object):
         cropped_bbox = Bbox.intersection(bbox, self.bounds)
         dmin = np.absolute(bbox.minpt - cropped_bbox.minpt)
         dmax = dmin + cropped_bbox.size3()
-        img = img[ dmin.x:dmax.x, dmin.y:dmax.y, dmin.z:dmax.z ] 
+        img = img[ dmin.x:dmax.x, dmin.y:dmax.y, dmin.z:dmax.z ]
         bbox = cropped_bbox
 
     if bbox.volume() < 1:
@@ -906,36 +907,36 @@ class CloudVolume(object):
 
   def upload_from_shared_memory(self, location, bbox, order='F', cutout_bbox=None):
     """
-    Upload from a shared memory array. 
+    Upload from a shared memory array.
 
     https://github.com/seung-lab/cloud-volume/wiki/Advanced-Topic:-Shared-Memory
 
     tip: If you want to use slice notation, np.s_[...] will help in a pinch.
 
-    MEMORY LIFECYCLE WARNING: You are responsible for managing the lifecycle of the 
-      shared memory. CloudVolume will merely read from it, it will not unlink the 
-      memory automatically. To fully clear the shared memory you must unlink the 
+    MEMORY LIFECYCLE WARNING: You are responsible for managing the lifecycle of the
+      shared memory. CloudVolume will merely read from it, it will not unlink the
+      memory automatically. To fully clear the shared memory you must unlink the
       location and close any mmap file handles. You can use `cloudvolume.sharedmemory.unlink(...)`
       to help you unlink the shared memory file.
 
-    EXPERT MODE WARNING: If you aren't sure you need this function (e.g. to relieve 
-      memory pressure or improve performance in some way) you should use the ordinary 
-      upload method of vol[:] = img. A typical use case is transferring arrays between 
+    EXPERT MODE WARNING: If you aren't sure you need this function (e.g. to relieve
+      memory pressure or improve performance in some way) you should use the ordinary
+      upload method of vol[:] = img. A typical use case is transferring arrays between
       different processes without making copies. For reference, this feature was created
       for uploading a 62 GB array that originated in Julia.
 
     Required:
       location: (str) Shared memory location e.g. 'cloudvolume-shm-RANDOM-STRING'
-        This typically corresponds to a file in `/dev/shm` or `/run/shm/`. It can 
+        This typically corresponds to a file in `/dev/shm` or `/run/shm/`. It can
         also be a file if you're using that for mmap.
       bbox: (Bbox or list of slices) the bounding box the shared array represents. For instance
         if you have a 1024x1024x128 volume and you're uploading only a 512x512x64 corner
         touching the origin, your Bbox would be `Bbox( (0,0,0), (512,512,64) )`.
     Optional:
       cutout_bbox: (bbox or list of slices) If you only want to upload a section of the
-        array, give the bbox in volume coordinates (not image coordinates) that should 
-        be cut out. For example, if you only want to upload 256x256x32 of the upper 
-        rightmost corner of the above example but the entire 512x512x64 array is stored 
+        array, give the bbox in volume coordinates (not image coordinates) that should
+        be cut out. For example, if you only want to upload 256x256x32 of the upper
+        rightmost corner of the above example but the entire 512x512x64 array is stored
         in memory, you would provide: `Bbox( (256, 256, 32), (512, 512, 64) )`
 
         By default, just upload the entire image.
@@ -944,15 +945,15 @@ class CloudVolume(object):
     """
     def tobbox(x):
       if type(x) == Bbox:
-        return x 
+        return x
       return Bbox.from_slices(x)
-        
+
     bbox = tobbox(bbox)
     cutout_bbox = tobbox(cutout_bbox) if cutout_bbox else bbox.clone()
 
     if not bbox.contains_bbox(cutout_bbox):
       raise IndexError("""
-        The provided cutout is not wholly contained in the given array. 
+        The provided cutout is not wholly contained in the given array.
         Bbox:        {}
         Cutout:      {}
       """.format(bbox, cutout_bbox))
@@ -969,10 +970,10 @@ class CloudVolume(object):
 
     delta_box = cutout_bbox.clone() - bbox.minpt
     cutout_image = shared_image[ delta_box.to_slices() ]
-    
-    txrx.upload_image(self, cutout_image, cutout_bbox.minpt, parallel=self.parallel, 
+
+    txrx.upload_image(self, cutout_image, cutout_bbox.minpt, parallel=self.parallel,
       manual_shared_memory_id=location, manual_shared_memory_bbox=bbox, manual_shared_memory_order=order)
-    mmap_handle.close() 
+    mmap_handle.close()
 
   def upload_boss_image(self, img, offset):
     shape = Vec(*img.shape[:3])
@@ -990,10 +991,10 @@ class CloudVolume(object):
     layer_type = 'image' if self.layer_type == 'unknown' else self.layer_type
 
     chan = ChannelResource(
-      collection_name=self.path.bucket, 
-      experiment_name=self.path.dataset, 
+      collection_name=self.path.bucket,
+      experiment_name=self.path.dataset,
       name=self.path.layer, # Channel
-      type=layer_type, 
+      type=layer_type,
       datatype=self.dtype,
     )
 
@@ -1009,6 +1010,6 @@ class CloudVolume(object):
   def save_mesh(self, *args, **kwargs):
     warn("WARNING: vol.save_mesh is deprecated. Please use vol.mesh.save(...) instead.")
     self.mesh.save(*args, **kwargs)
-    
+
 
 
