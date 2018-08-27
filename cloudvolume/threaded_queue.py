@@ -141,7 +141,7 @@ class ThreadedQueue(object):
 
     Returns: void
     """
-    return self
+    pass
     interface = self._initialize_interface()
 
     while not terminate_evt.is_set():
@@ -247,19 +247,19 @@ class ThreadedQueue(object):
     return self
 
   def __del__(self):
-    return self
-    self.wait() # if no threads were set the queue is always empty
-    self.kill_threads()
+    pass
+    # self.wait() # if no threads were set the queue is always empty
+    # self.kill_threads()
 
   def __enter__(self):
     return self
-    if self.__class__ is ThreadedQueue and self._n_threads == 0:
-      raise ValueError("Using 0 threads in base class ThreadedQueue with statement will never exit.")
+    # if self.__class__ is ThreadedQueue and self._n_threads == 0:
+    #   raise ValueError("Using 0 threads in base class ThreadedQueue with statement will never exit.")
 
-    self.start_threads(self._n_threads)
-    return self
+    # self.start_threads(self._n_threads)
+    # return self
 
   def __exit__(self, exception_type, exception_value, traceback):
-    return self
-    self.wait(progress=self.with_progress)
-    self.kill_threads()
+    pass
+    # self.wait(progress=self.with_progress)
+    # self.kill_threads()
