@@ -1,26 +1,32 @@
 from __future__ import print_function
 from six.moves import range, reduce
 
-from collections import namedtuple
 import json
 import os
-import io
 import re 
 import sys
 import math
-import shutil
 import operator
 import time
+import types
+import random
+import string 
 from itertools import product
 
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
 
+from .exceptions import OutOfBoundsError
+
 if sys.version_info < (3,):
-    integer_types = (int, long,)
+  integer_types = (int, long, np.integer)
+  string_types = (str, basestring, unicode)
 else:
-    integer_types = (int,)
+  integer_types = (int, np.integer)
+  string_types = (str,)
+
+floating_types = (float, np.floating)
 
 COLORS = {
   'RESET': "\033[m",
@@ -29,12 +35,78 @@ COLORS = {
   'GREEN': '\033[1;92m',
 }
 
+# Formula produces machine epsilon regardless of platform architecture
+MACHINE_EPSILON = (7. / 3) - (4. / 3) - 1
 
 class NumpyEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        return json.JSONEncoder.default(self, obj)
+  def default(self, obj):
+    if isinstance(obj, np.ndarray):
+      return obj.tolist()
+    if isinstance(obj, np.integer):
+      return int(obj)
+    if isinstance(obj, np.floating):
+      return float(obj)
+    return json.JSONEncoder.default(self, obj)
+
+def nvl(*args):
+  for arg in args:
+    if arg is not None:
+      return arg
+  return None
+
+def first(lst):
+  if isinstance(lst, types.GeneratorType):
+    try:
+      return next(lst)
+    except StopIteration:
+      return None
+  try:
+    return lst[0]
+  except TypeError:
+    try:
+      return next(iter(lst))
+    except StopIteration:
+      return None
+
+def sip(iterable, block_size):
+  """Sips a fixed size from the iterable."""
+  ct = 0
+  block = []
+  for x in iterable:
+    ct += 1
+    block.append(x)
+    if ct == block_size:
+      yield block
+      ct = 0
+      block = []
+
+  if len(block) > 0:
+    yield block
+
+def toiter(obj, is_iter=False):
+  if isinstance(obj, str) or isinstance(obj, dict):
+    if is_iter:
+      return [ obj ], False
+    return [ obj ]
+
+  try:
+    iter(obj)
+    if is_iter:
+      return obj, True
+    return obj 
+  except TypeError:
+    if is_iter:
+      return [ obj ], False
+    return [ obj ]
+
+def duplicates(lst):
+  dupes = []
+  seen = set()
+  for elem in lst:
+    if elem in seen:
+      dupes.append(elem)
+    seen.add(elem)
+  return set(dupes)
 
 def jsonify(obj, **kwargs):
   return json.dumps(obj, cls=NumpyEncoder, **kwargs)
@@ -52,53 +124,13 @@ def colorize(color, text):
   color = color.upper()
   return COLORS[color] + text + COLORS['RESET']
 
-ExtractedPath = namedtuple('ExtractedPath', 
-  ('protocol', 'intermediate_path', 'bucket', 'dataset','layer')
-)
-
-def extract_path(cloudpath):
-  """cloudpath: e.g. gs://neuroglancer/DATASET/LAYER/info or s3://..."""
-  protocol_re = r'^(gs|file|s3|boss|matrix|https?)://'
-  bucket_re = r'^(/?[~\d\w_\.\-]+)/'
-  tail_re = r'([\d\w_\.\-]+)/([\d\w_\.\-]+)/?$'
-
-  error = ValueError("""
-    Cloud path must conform to PROTOCOL://BUCKET/zero/or/more/dirs/DATASET/LAYER
-    Example: gs://test_bucket/mouse_dataset/em
-
-    Supported protocols: gs, s3, file, matrix, boss, http, https
-
-    Received: {}
-    """.format(cloudpath))
-
-  match = re.match(protocol_re, cloudpath)
-
-  if not match:
-    raise error
-
-  (protocol,) = match.groups()
-  cloudpath = re.sub(protocol_re, '', cloudpath)
-  if protocol == 'file':
-    cloudpath = toabs(cloudpath)
-
-  match = re.match(bucket_re, cloudpath)
-  if not match:
-    raise error
-
-  (bucket,) = match.groups()
-  cloudpath = re.sub(bucket_re, '', cloudpath)
-
-  match = re.search(tail_re, cloudpath)
-  if not match:
-    raise error
-  dataset, layer = match.groups()
-
-  intermediate_path = re.sub(tail_re, '', cloudpath)
-  return ExtractedPath(protocol, intermediate_path, bucket, dataset, layer)
+def generate_random_string(size=6):
+  return ''.join(random.SystemRandom().choice(
+    string.ascii_lowercase + string.digits) for _ in range(size)
+  )
 
 def toabs(path):
-  home = os.path.join(os.environ['HOME'], '')
-  path = re.sub('^~/?', home, path)
+  path = os.path.expanduser(path)
   return os.path.abspath(path)
 
 def mkdir(path):
@@ -119,19 +151,6 @@ def mkdir(path):
 def touch(path):
   mkdir(os.path.dirname(path))
   open(path, 'a').close()
-
-def list_shape(shape, elem=None):
-    """create Nd list filled wtih elem. e.g. shape([2,2], 0) => [ [0,0], [0,0] ]"""
-
-    if (len(shape) == 0):
-        return []
-
-    def helper(elem, shape, i):
-        if len(shape) - 1 == i:
-            return [elem] * shape[i]
-        return [ helper(elem, shape, i+1) for _ in range(shape[i]) ]
-
-    return helper(elem, shape, 0)
 
 def find_closest_divisor(to_divide, closest_to):
   """
@@ -169,6 +188,11 @@ def divisors(n):
       if i*i != n:
         yield n / i
 
+def scatter(sequence, n):
+  """Scatters elements of ``sequence`` into ``n`` blocks. Returns generator."""
+  for i in range(n):
+    yield sequence[i::n]
+
 def xyzrange(start_vec, end_vec=None, stride_vec=(1,1,1)):
   if end_vec is None:
     end_vec = start_vec
@@ -189,7 +213,7 @@ def xyzrange(start_vec, end_vec=None, stride_vec=(1,1,1)):
   def vectorize():
     pt = Vec(0,0,0)
     for z,y,x in product(*zyxranges):
-      pt.x, pt.y, pt.z = x, y, z
+      pt.x, pt.y, pt.z = min(x, end_vec[0]), min(y, end_vec[1]), min(z, end_vec[2])
       yield pt
 
   return vectorize()
@@ -218,7 +242,7 @@ def clamp(val, low, high):
 
 def check_bounds(val, low, high):
   if val > high or val < low:
-    raise ValueError('Value {} cannot be outside of inclusive range {} to {}'.format(val,low,high))
+    raise OutOfBoundsError('Value {} cannot be outside of inclusive range {} to {}'.format(val,low,high))
   return val
 
 class Vec(np.ndarray):
@@ -269,117 +293,261 @@ Vec.b = Vec.z
 Vec.a = Vec.w
 
 
-class Bbox(object):
-  """Represents a three dimensional cuboid in space."""
-  def __init__(self, a, b):
-    self.minpt = Vec(
-      min(a[0], b[0]),
-      min(a[1], b[1]),
-      min(a[2], b[2])
-    )
+def floating(lst):
+  return any(( isinstance(x, float) for x in lst ))
 
-    self.maxpt = Vec(
-      max(a[0], b[0]),
-      max(a[1], b[1]),
-      max(a[2], b[2])
-    )
+FILENAME_RE = re.compile(r'(-?\d+)-(-?\d+)_(-?\d+)-(-?\d+)_(-?\d+)-(-?\d+)(?:\.gz|\.br)?$')
+
+class Bbox(object):
+  __slots__ = [ 'minpt', 'maxpt', '_dtype' ]
+
+  """Represents a three dimensional cuboid in space."""
+  def __init__(self, a, b, dtype=None):
+    if dtype is None:
+      if floating(a) or floating(b):
+        dtype = np.float32
+      else:
+        dtype = np.int32
+
+    self.minpt = Vec(*[ min(ai,bi) for ai,bi in zip(a,b) ], dtype=dtype)
+    self.maxpt = Vec(*[ max(ai,bi) for ai,bi in zip(a,b) ], dtype=dtype)
+
+    self._dtype = np.dtype(dtype)
+
+  @classmethod
+  def deserialize(cls, bbx_data):
+    bbx_data = json.loads(bbx_data)
+    return Bbox.from_dict(bbx_data)
+
+  def serialize(self):
+    return json.dumps(self.to_dict())
+
+  @property
+  def ndim(self):
+    return len(self.minpt)
+
+  @property 
+  def dtype(self):
+    return self._dtype
 
   @classmethod
   def intersection(cls, bbx1, bbx2):
-    if not Bbox.intersects(bbx1, bbx2):
-      return Bbox( (0,0,0), (0,0,0) )
+    result = Bbox( [ 0 ] * bbx1.ndim, [ 0 ] * bbx2.ndim )
 
-    result = Bbox( (0,0,0), (0,0,0) )
-    result.minpt.x = max(bbx1.minpt.x, bbx2.minpt.x)
-    result.minpt.y = max(bbx1.minpt.y, bbx2.minpt.y)
-    result.minpt.z = max(bbx1.minpt.z, bbx2.minpt.z)
-    result.maxpt.x = min(bbx1.maxpt.x, bbx2.maxpt.x)
-    result.maxpt.y = min(bbx1.maxpt.y, bbx2.maxpt.y)
-    result.maxpt.z = min(bbx1.maxpt.z, bbx2.maxpt.z)
+    if not Bbox.intersects(bbx1, bbx2):
+      return result
+    
+    for i in range(result.ndim):
+      result.minpt[i] = max(bbx1.minpt[i], bbx2.minpt[i])
+      result.maxpt[i] = min(bbx1.maxpt[i], bbx2.maxpt[i])
 
     return result
 
   @classmethod
   def intersects(cls, bbx1, bbx2):
-    return (
-          bbx1.minpt.x < bbx2.maxpt.x 
-      and bbx1.maxpt.x > bbx2.minpt.x 
-      and bbx1.minpt.y < bbx2.maxpt.y
-      and bbx1.maxpt.y > bbx2.minpt.y
-      and bbx1.minpt.z < bbx2.maxpt.z
-      and bbx1.maxpt.z > bbx2.minpt.z 
-    )
+    return np.all(bbx1.minpt < bbx2.maxpt) and np.all(bbx1.maxpt > bbx2.minpt)
 
   @classmethod
   def near_edge(cls, bbx1, bbx2, distance=0):
     return (
-         abs(bbx1.minpt.x - bbx2.minpt.x) <= distance
-      or abs(bbx1.minpt.y - bbx2.minpt.y) <= distance
-      or abs(bbx1.minpt.z - bbx2.minpt.z) <= distance
-      or abs(bbx1.maxpt.x - bbx2.maxpt.x) <= distance
-      or abs(bbx1.maxpt.y - bbx2.maxpt.y) <= distance
-      or abs(bbx1.maxpt.z - bbx2.maxpt.z) <= distance
+         np.any( np.abs(bbx1.minpt - bbx2.minpt) <= distance )
+      or np.any( np.abs(bbx1.maxpt - bbx2.maxpt) <= distance )
     )
 
   @classmethod
-  def create(cls, obj):
+  def create(cls, obj, context=None, bounded=False, autocrop=False):
     typ = type(obj)
     if typ is Bbox:
-      return obj
-    elif typ is list:
-      return Bbox.from_slices(obj)
+      obj = obj
+    elif typ in (list, tuple):
+      obj = Bbox.from_slices(obj, context, bounded, autocrop)
     elif typ is Vec:
-      return Bbox.from_vec(obj)
-    elif typ is str:
-      return Bbox.from_filename(obj)
+      obj = Bbox.from_vec(obj)
+    elif typ in string_types:
+      obj = Bbox.from_filename(obj)
+    elif typ is dict:
+      obj = Bbox.from_dict(obj)
     else:
       raise NotImplementedError("{} is not a Bbox convertible type.".format(typ))
 
-  @classmethod
-  def from_vec(cls, vec):
-    return Bbox( (0,0,0), vec )
+    if context and autocrop:
+      obj = Bbox.intersection(obj, context)
+
+    if context and bounded:
+      if not context.contains_bbox(obj):
+        raise OutOfBoundsError(
+          "{} did not fully contain the specified bounding box {}.".format(
+            context, obj
+        ))
+
+    return obj
 
   @classmethod
-  def from_filename(cls, filename):
-    match = re.search(r'(-?\d+)-(-?\d+)_(-?\d+)-(-?\d+)_(-?\d+)-(-?\d+)(?:\.gz)?$', os.path.basename(filename))
+  def from_delta(cls, minpt, plus):
+    return Bbox( minpt, Vec(*minpt) + plus )
+
+  @classmethod
+  def from_dict(cls, data):
+    dtype = data['dtype'] if 'dtype' in data else np.float32
+    return Bbox( data['minpt'], data['maxpt'], dtype=dtype)
+
+  @classmethod
+  def from_vec(cls, vec, dtype=int):
+    return Bbox( (0,0,0), vec, dtype=dtype)
+
+  @classmethod
+  def from_filename(cls, filename, dtype=int):
+    match = FILENAME_RE.search(os.path.basename(filename))
+
+    if match is None:
+      raise ValueError("Unable to decode bounding box from: " + str(filename))
 
     (xmin, xmax,
      ymin, ymax,
      zmin, zmax) = map(int, match.groups())
 
-    return Bbox( (xmin, ymin, zmin), (xmax, ymax, zmax) )
+    return Bbox( (xmin, ymin, zmin), (xmax, ymax, zmax), dtype=dtype)
 
   @classmethod
-  def from_slices(cls, slices3):
+  def from_slices(cls, slices, context=None, bounded=False, autocrop=False):
+    if context:
+      slices = context.reify_slices(
+        slices, bounded=bounded, autocrop=autocrop
+      )
+
+    for slc in slices:
+      if slc.step not in (None, 1):
+        raise ValueError("Non-unitary steps are unsupported. Got: " + str(slc.step))
+
     return Bbox(
-      (slices3[0].start, slices3[1].start, slices3[2].start), 
-      (slices3[0].stop, slices3[1].stop, slices3[2].stop) 
+      [ slc.start for slc in slices ],
+      [ (slc.start if slc.stop < slc.start else slc.stop) for slc in slices ]
     )
 
   @classmethod
   def from_list(cls, lst):
-    return Bbox( lst[:3], lst[3:6] )
+    """
+    from_list(cls, lst)
+    
+    the first half of the values are the minpt, 
+    the last half are the maxpt
+    """
+    half = len(lst) // 2 
+    return Bbox( lst[:half], lst[half:] )
 
-  @property
-  def dtype(self):
-    return self.minpt.dtype
-  
+  @classmethod
+  def from_points(cls, arr):
+    """Create a Bbox from a point cloud arranged as:
+      [
+        [x,y,z],
+        [x,y,z],
+        ...
+      ]
+    """
+    arr = np.array(arr, dtype=np.float32)
+
+    mins = []
+    maxes = []
+
+    for i in range(arr.shape[1]):
+      mins.append( np.min(arr[:,i]) )
+      maxes.append( np.max(arr[:,i]) )
+
+    return Bbox( mins, maxes, dtype=np.int64)
+
   def to_filename(self):
-    return '{}-{}_{}-{}_{}-{}'.format(
-      self.minpt.x, self.maxpt.x,
-      self.minpt.y, self.maxpt.y,
-      self.minpt.z, self.maxpt.z,
+    return '_'.join(
+      ( str(self.minpt[i]) + '-' + str(self.maxpt[i]) for i in range(self.ndim) )
     )
 
   def to_slices(self):
-    return (
-      slice(int(self.minpt.x), int(self.maxpt.x)),
-      slice(int(self.minpt.y), int(self.maxpt.y)),
-      slice(int(self.minpt.z), int(self.maxpt.z))
-    )
+    return tuple([
+      slice(int(self.minpt[i]), int(self.maxpt[i])) for i in range(self.ndim)
+    ])
 
   def to_list(self):
     return list(self.minpt) + list(self.maxpt)
+
+  def to_dict(self):
+    return {
+      'minpt': self.minpt.tolist(),
+      'maxpt': self.maxpt.tolist(),
+      'dtype': np.dtype(self.dtype).name,
+    }
+
+  def reify_slices(self, slices, bounded=True, autocrop=False):
+    """
+    Convert free attributes of a slice object 
+    (e.g. None (arr[:]) or Ellipsis (arr[..., 0]))
+    into bound variables in the context of this
+    bounding box.
+
+    That is, for a ':' slice, slice.start will be set
+    to the value of the respective minpt index of 
+    this bounding box while slice.stop will be set 
+    to the value of the respective maxpt index.
+
+    Example:
+      bbx = Bbox( (-1,-2,-3), (1,2,3) )
+      bbx.reify_slices( (np._s[:],) )
+      
+      >>> [ slice(-1,1,1), slice(-2,2,1), slice(-3,3,1) ]
+
+    Returns: [ slice, ... ]
+    """
+    if isinstance(slices, integer_types) or isinstance(slices, floating_types):
+      slices = [ slice(int(slices), int(slices)+1, 1) ]
+    elif type(slices) == slice:
+      slices = [ slices ]
+    elif type(slices) == Bbox:
+      slices = slices.to_slices()
+    elif slices == Ellipsis:
+      slices = []
+
+    slices = list(slices)
+
+    for index, slc in enumerate(slices):
+      if slc == Ellipsis:
+        fill = self.ndim - len(slices) + 1
+        slices = slices[:index] +  (fill * [ slice(None, None, None) ]) + slices[index+1:]
+        break
+
+    while len(slices) < self.ndim:
+      slices.append( slice(None, None, None) )
+
+    # First three slices are x,y,z, last is channel. 
+    # Handle only x,y,z here, channel seperately
+    for index, slc in enumerate(slices):
+      if isinstance(slc, integer_types) or isinstance(slc, floating_types):
+        slices[index] = slice(int(slc), int(slc)+1, 1)
+      elif slc == Ellipsis:
+        raise ValueError("More than one Ellipsis operator used at once.")
+      else:
+        start = self.minpt[index] if slc.start is None else slc.start
+        end = self.maxpt[index] if slc.stop is None else slc.stop 
+        step = 1 if slc.step is None else slc.step
+
+        if step < 0:
+          raise ValueError('Negative step sizes are not supported. Got: {}'.format(step))
+
+        if autocrop:
+          start = clamp(start, self.minpt[index], self.maxpt[index])
+          end = clamp(end, self.minpt[index], self.maxpt[index])
+        # note: when unbounded, negative indicies do not refer to
+        # the end of the volume as they can describe, e.g. a 1px
+        # border on the edge of the beginning of the dataset as in
+        # marching cubes.
+        elif bounded:
+          # if start < 0: # this is support for negative indicies
+            # start = self.maxpt[index] + start         
+          check_bounds(start, self.minpt[index], self.maxpt[index])
+          # if end < 0: # this is support for negative indicies
+          #   end = self.maxpt[index] + end
+          check_bounds(end, self.minpt[index], self.maxpt[index])
+
+        slices[index] = slice(start, end, step)
+
+    return slices
 
   @classmethod
   def expand(cls, *args):
@@ -396,11 +564,47 @@ class Bbox(object):
     result.maxpt = Vec.clamp(bbx0.maxpt, bbx1.minpt, bbx1.maxpt)
     return result
 
+  def size(self):
+    return Vec(*(self.maxpt - self.minpt), dtype=self.dtype)
+
   def size3(self):
-    return Vec(*(self.maxpt - self.minpt))
+    return Vec(*(self.maxpt[:3] - self.minpt[:3]), dtype=self.dtype)
+
+  def subvoxel(self):
+    """
+    Previously, we used bbox.volume() < 1 for testing
+    if a bounding box was larger than one voxel. However, 
+    if two out of three size dimensions are negative, the 
+    product will be positive. Therefore, we first test that 
+    the maxpt is to the right of the minpt before computing 
+    whether conjunctioned with volume() < 1.
+
+    Returns: boolean
+    """
+    return (not self.valid()) or self.volume() < 1
+
+  def empty(self):
+    """
+    Previously, we used bbox.volume() <= 0 for testing
+    if a bounding box was empty. However, if two out of 
+    three size dimensions are negative, the product will 
+    be positive. Therefore, we first test that the maxpt 
+    is to the right of the minpt before computing whether 
+    the bbox is empty and account for 20x machine epsilon 
+    of floating point error.
+
+    Returns: boolean
+    """
+    return (not self.valid()) or (self.volume() < (20 * MACHINE_EPSILON))
+
+  def valid(self):
+    return np.all(self.minpt <= self.maxpt)
 
   def volume(self):
-    return self.size3().rectVolume()
+    if np.issubdtype(self.dtype, np.integer):
+      return self.size3().astype(np.int64).rectVolume()
+    else:
+      return self.size3().astype(np.float64).rectVolume()
 
   def center(self):
     return (self.minpt + self.maxpt) / 2.0
@@ -416,7 +620,7 @@ class Bbox(object):
     self.minpt += amt
     self.maxpt -= amt
 
-    if np.any(self.minpt > self.maxpt):
+    if not self.valid():
       raise ValueError("Cannot shrink bbox below zero volume.")
 
     return self
@@ -429,6 +633,9 @@ class Bbox(object):
     Required:
       chunk_size: arraylike (x,y,z), the size of chunks in the 
                     dataset e.g. (64,64,64)
+      offset: arraylike (x,y,z) the origin of the coordinate system
+        so that this offset can be accounted for in the grid line 
+        calculation.
     Optional:
       offset: arraylike (x,y,z), the starting coordinate of the dataset
     """
@@ -437,7 +644,7 @@ class Bbox(object):
     result = result - offset
     result.minpt = np.floor(result.minpt / chunk_size) * chunk_size
     result.maxpt = np.ceil(result.maxpt / chunk_size) * chunk_size 
-    return result + offset
+    return (result + offset).astype(self.dtype)
 
   def shrink_to_chunk_size(self, chunk_size, offset=Vec(0,0,0, dtype=int)):
     """
@@ -447,6 +654,9 @@ class Bbox(object):
     Required:
       chunk_size: arraylike (x,y,z), the size of chunks in the 
                     dataset e.g. (64,64,64)
+      offset: arraylike (x,y,z) the origin of the coordinate system
+        so that this offset can be accounted for in the grid line 
+        calculation.
     Optional:
       offset: arraylike (x,y,z), the starting coordinate of the dataset
     """
@@ -462,7 +672,7 @@ class Bbox(object):
     if np.any(result.minpt > result.maxpt):
       result.maxpt = result.minpt.clone()
 
-    return result + offset
+    return (result + offset).astype(self.dtype)
 
   def round_to_chunk_size(self, chunk_size, offset=Vec(0,0,0, dtype=int)):
     """
@@ -472,6 +682,9 @@ class Bbox(object):
     Required:
       chunk_size: arraylike (x,y,z), the size of chunks in the 
                     dataset e.g. (64,64,64)
+      offset: arraylike (x,y,z) the origin of the coordinate system
+        so that this offset can be accounted for in the grid line 
+        calculation.
     Optional:
       offset: arraylike (x,y,z), the starting coordinate of the dataset
     """
@@ -480,7 +693,7 @@ class Bbox(object):
     result = result - offset
     result.minpt = np.round(result.minpt / chunk_size) * chunk_size
     result.maxpt = np.round(result.maxpt / chunk_size) * chunk_size
-    return result + offset
+    return (result + offset).astype(self.dtype)
 
   def contains(self, point):
     """
@@ -488,30 +701,20 @@ class Bbox(object):
 
     Returns: boolean
     """
-    return (
-          point[0] >= self.minpt[0] 
-      and point[1] >= self.minpt[1]
-      and point[2] >= self.minpt[2] 
-      and point[0] <= self.maxpt[0] 
-      and point[1] <= self.maxpt[1]
-      and point[2] <= self.maxpt[2]
-    )
+    return np.all(point >= self.minpt) and np.all(point <= self.maxpt)
 
   def contains_bbox(self, bbox):
     return self.contains(bbox.minpt) and self.contains(bbox.maxpt)
 
-  def astype(self, typ):
-    self.minpt = self.minpt.astype(typ)
-    self.maxpt = self.maxpt.astype(typ)
-
   def clone(self):
-    return Bbox(self.minpt, self.maxpt)
+    return Bbox(self.minpt, self.maxpt, dtype=self.dtype)
 
-  def astype(self, dtype):
-    result = self.clone()
-    result.minpt = self.minpt.astype(dtype)
-    result.maxpt = self.maxpt.astype(dtype)
-    return result
+  def astype(self, typ):
+    tmp = self.clone()
+    tmp.minpt = tmp.minpt.astype(typ)
+    tmp.maxpt = tmp.maxpt.astype(typ)
+    tmp._dtype = tmp.minpt.dtype 
+    return tmp
 
   def transpose(self):
     return Bbox(self.minpt[::-1], self.maxpt[::-1])
@@ -553,26 +756,55 @@ class Bbox(object):
     tmp = self.clone()
     tmp.minpt *= operand
     tmp.maxpt *= operand
-    return tmp
+    return tmp.astype(tmp.minpt.dtype)
+
+  def __idiv__(self, operand):
+    if (
+      isinstance(operand, float) \
+      or self.dtype in (float, np.float32, np.float64) \
+      or (hasattr(operand, 'dtype') and operand.dtype in (float, np.float32, np.float64))
+    ):
+      return self.__itruediv__(operand)
+    else:
+      return self.__ifloordiv__(operand)
 
   def __div__(self, operand):
-    return self.__floordiv__(operand)
+    if (
+      isinstance(operand, float) \
+      or self.dtype in (float, np.float32, np.float64) \
+      or (hasattr(operand, 'dtype') and operand.dtype in (float, np.float32, np.float64))
+    ):
+
+      return self.__truediv__(operand)
+    else:
+      return self.__floordiv__(operand)
+
+  def __ifloordiv__(self, operand):
+    self.minpt //= operand
+    self.maxpt //= operand
+    return self
 
   def __floordiv__(self, operand):
-    tmp = self.clone()
+    tmp = self.astype(float)
     tmp.minpt //= operand
     tmp.maxpt //= operand
-    return tmp
+    return tmp.astype(int)
+
+  def __itruediv__(self, operand):
+    res = self.__truediv__(operand)
+    self.minpt[:] = res.minpt[:]
+    self.maxpt[:] = res.maxpt[:]
+    return self
 
   def __truediv__(self, operand):
     tmp = self.clone()
 
-    if type(operand) is int:
+    if isinstance(operand, int):
       operand = float(operand)
 
-    tmp.minpt = Vec(*( tmp.minpt.astype(float) / operand ))
-    tmp.maxpt = Vec(*( tmp.maxpt.astype(float) / operand ))
-    return tmp
+    tmp.minpt = Vec(*( tmp.minpt.astype(float) / operand ), dtype=float)
+    tmp.maxpt = Vec(*( tmp.maxpt.astype(float) / operand ), dtype=float)
+    return tmp.astype(tmp.minpt.dtype)
 
   def __ne__(self, other):
     return not (self == other)
@@ -581,71 +813,35 @@ class Bbox(object):
     return np.array_equal(self.minpt, other.minpt) and np.array_equal(self.maxpt, other.maxpt)
 
   def __hash__(self):
-    return int(''.join(self.to_list()))
+    return int(''.join(map(str, map(int, self.to_list()))))
 
   def __repr__(self):
-    return "Bbox({},{})".format(list(self.minpt), list(self.maxpt))
+    return "Bbox({},{}, dtype={})".format(list(self.minpt), list(self.maxpt), self.dtype)
 
-
-def generate_slices(slices, minsize, maxsize, bounded=True):
-  """Assisting function for __getitem__. e.g. vol[:,:,:,:]"""
-
-  if isinstance(slices, integer_types) or isinstance(slices, float):
-    slices = [ slice(int(slices), int(slices)+1, 1) ]
-  if type(slices) == slice:
-    slices = [ slices ]
-
-  slices = list(slices)
-
-  while len(slices) < len(maxsize):
-    slices.append( slice(None, None, None) )
-
-  # First three slices are x,y,z, last is channel. 
-  # Handle only x,y,z here, channel seperately
-  for index, slc in enumerate(slices):
-    if isinstance(slc, integer_types) or isinstance(slc, float):
-      slices[index] = slice(int(slc), int(slc)+1, 1)
-    else:
-      start = minsize[index] if slc.start is None else slc.start
-      end = maxsize[index] if slc.stop is None else slc.stop 
-      step = 1 if slc.step is None else slc.step
-
-      if step < 0:
-        raise ValueError('Negative step sizes are not supported. Got: {}'.format(step))
-
-      # note: when unbounded, negative indicies do not refer to
-      # the end of the volume as they can describe, e.g. a 1px
-      # border on the edge of the beginning of the dataset as in
-      # marching cubes.
-      if bounded:
-        # if start < 0: # this is support for negative indicies
-          # start = maxsize[index] + start         
-        check_bounds(start, minsize[index], maxsize[index])
-        # if end < 0: # this is support for negative indicies
-        #   end = maxsize[index] + end
-        check_bounds(end, minsize[index], maxsize[index])
-
-      slices[index] = slice(start, end, step)
-
-  return slices
-
-def save_images(image, directory=None, axis='z', channel=None, global_norm=True, image_format='PNG'):
+def save_images(
+  image, directory=None, axis='z', 
+  channel=None, global_norm=True, 
+  image_format='PNG', progress=True):
   """
   Serialize a 3D or 4D array into a series of PNGs for visualization.
 
   image: A 3D or 4D numpy array. Supported dtypes: integer, float, boolean
   axis: 'x', 'y', 'z'
-  channel: None, 0,1,2, etc, which channel to serialize. Does all by default.
+  channel: None, 0, 1, 2, etc, which channel to serialize. Does all by default.
   directory: override the default output directory
   global_norm: Normalize floating point volumes globally or per slice?
   image_format: 'PNG', 'JPEG', etc
+  progress: display progress bars and messages
+
+  Returns: the directory path written to
   """
   if directory is None:
     directory = os.path.join('./saved_images', 'default', 'default', '0', Bbox( (0,0,0), image.shape[:3] ).to_filename())
   
   mkdir(directory)
 
-  print("Saving to {}".format(directory))
+  if progress:
+    print("Saving to {}".format(directory))
 
   indexmap = {
     'x': 0,
@@ -657,8 +853,8 @@ def save_images(image, directory=None, axis='z', channel=None, global_norm=True,
 
   channel = slice(None) if channel is None else channel
 
-  if len(image.shape) == 3:
-    image = image[:,:,:, np.newaxis ]
+  while image.ndim < 4:
+    image = image[..., np.newaxis ]
 
   def normalize_float(img):
     img = np.copy(img)
@@ -668,10 +864,10 @@ def save_images(image, directory=None, axis='z', channel=None, global_norm=True,
     img = (img - lower) / (upper - lower) * 255.0
     return img.astype(np.uint8)
 
-  if global_norm and image.dtype in (np.float32, np.float64):
+  if global_norm and np.issubdtype(image.dtype, np.floating):
     image = normalize_float(image)      
 
-  for level in tqdm(range(image.shape[index]), desc="Saving Images"):
+  for level in tqdm(range(image.shape[index]), desc="Saving Images", disable=(not progress)):
     if index == 0:
       img = image[level, :, :, channel ]
     elif index == 1:
@@ -679,7 +875,10 @@ def save_images(image, directory=None, axis='z', channel=None, global_norm=True,
     elif index == 2:
       img = image[:, :, level, channel ]
     else:
-      raise NotImplemented
+      raise IndexError("Index {} is not valid. Expected 0, 1, or 2.".format(index))
+
+    while img.ndim < 3:
+      img = img[..., np.newaxis ]
 
     num_channels = img.shape[2]
 
@@ -712,3 +911,5 @@ def save_images(image, directory=None, axis='z', channel=None, global_norm=True,
 
       path = os.path.join(directory, filename)
       img2d.save(path, image_format)
+
+  return toabs(directory)

@@ -1,6 +1,265 @@
 CHANGES
 =======
 
+=======
+0.50.0
+------
+
+* Version 0.50.0
+* feat: delete black uploads flag (#212)
+* docs: add link to public dataset examples
+* docs: update README
+* docs: add description of CloudVolume to \_\_init\_\_.py
+* chore: update ChangeLog AUTHORS
+
+0.49.3
+------
+
+* Version 0.49.3
+* perf: omit a network request when creating a GCS connection (#223)
+* perf: improve initialization performance of CV
+
+0.49.2
+------
+
+* Version 0.49.2
+* fix: http(s) should handle 404 like gs and s3
+
+0.49.1
+------
+
+* Version 0.49.1
+* feat: Support for GCS Batch Delete (#219)
+* docs: fix typo on autocrop (should be False, not True)
+* chore: update Trove classifiers, add markdown description classification
+* Add allow\_cropped flag to CloudVolume.download\_point (#215)
+* docs: replace npm server with vol.view() in documentation
+
+0.49.0
+------
+
+* Version 0.49.0
+* docs: added neuroglancer view server invocation to examples
+* feat: neuroglancer compatible link with vol.view() (#214)
+* docs: remove obsolete downsample parameter
+* docs: underlying -> chunk\_size, download\_point
+* fix: upgrade urllib3 (#213)
+
+0.48.0
+------
+
+* Version 0.48.0
+* feat: download\_point lets you download a cutout from just a coordinate
+* refactor: remove deprecated "output\_to\_shared\_memory" parameter
+* feat: export Vec class for use in other applications
+* misc enhancements (#209)
+* fix: missing protocol in error message
+
+0.47.5
+------
+
+* Version 0.47.5
+* feat: create\_new\_info accepts numpy datatypes for 'data\_type'
+* fix: color jpeg encoding support (#210)
+* fix: FutureWarning on type coercion
+* chore: prophylactic to avoid accidently uploading secrets
+* fix: more robust dtype detection
+* fix: select single channel in save\_images (#207)
+
+0.47.4
+------
+
+* Version 0.47.4
+* feat: more robust provenance refreshes (#205)
+* changing to an os independant character (#204)
+
+0.47.3
+------
+
+* Version 0.47.3
+* fix: add exp backoff to connection creation in connection pool
+
+0.47.2
+------
+
+* Version 0.47.2
+* perf: 1.5-2x faster CloudVolume on Google Cloud Storage (#202)
+
+0.47.1
+------
+
+* Version 0.47.1
+* chore: make sure intern is bumped to the latest version 0.9.13
+* chore: drop python 3.4 testing
+* chore: remove old python builds deployment
+* fix: Bbox.volume() would easily overflow
+* fix(from\_numpy): add boolean and use floating abstract dtype (#200)
+
+0.47.0
+------
+
+* Version 0.47.0
+* docs: Updated CloudVolume docstring
+* fix: from\_numpy error when using multiple mip levels (#197)
+* docs: Python 2.7 EOL statement + pretty up "Spinoff Projects"
+
+0.46.0
+------
+
+* Version 0.46.0
+* feat: Bbox.from\_delta
+* chore: fpzip 1.1.3 compatibility (#196)
+* fix: more robust SWC importer
+
+0.45.0
+------
+
+* Version 0.45.0
+* feat: from\_numpy function to create a Precomputed Volume (#188)
+* add support for default region (#195)
+* docs: update ChangeLog
+
+0.44.2
+------
+
+* Version 0.44.2
+* docs: add bool as a supported uViewer data type
+* docs: fix display of segmentation in uViewer
+* feat(uViewer): convert 64-bit int data to float64 for display w/ warning
+* refactor(uViewer): remove redundant branch logic
+* fix(uViewer): infinite and nan value handling
+* feat: support boolean arrays in microviewer
+* docs: update AUTHORS and ChangeLog
+
+0.44.1
+------
+
+* Version 0.44.1
+* feat: retry for Storage.list\_files
+* fix(save\_images): typo (#193)
+
+0.44.0
+------
+
+* Version 0.44.0
+* feat: Bbox serialize, deserialize, to\_dict, from\_dict
+* add a little bit comments; add support for environment variables (#185)
+* adding a chunk based duplicate vertex removal function (#182)
+
+0.43.1
+------
+
+* Version 0.43.1
+* fix: numpy 1.16.0 disallows write=True on string buffers
+* fix: remove uniqueItems from layer provenance schema
+
+0.43.0
+------
+
+* Version 0.43.0
+* feat(skeletonservice): joint preserving downsample (#177)
+
+0.42.3
+------
+
+* Version 0.42.3
+* fix: single mesh id save adds file suffix if filepath is None
+* fix: ensure fused mesh construction order stability
+* fix: make mesh vertices a uniform float32 array
+
+0.42.2
+------
+
+* Version 0.42.2
+* fix: https get\_files
+* chore: tab size 2 for test\_storage.py
+* docs: upload ChangeLog
+
+0.42.1
+------
+
+* Version 0.42.1
+* perf(meshservice): multithreaded mesh manifests (#176)
+
+0.42.0
+------
+
+* Version 0.42.0
+* fix: close requests streams  (#173)
+* feat: support ellipsis operator
+* fix: allow numpy scalar types for cloudvolume access
+* feat(uviewer): cast 2D and 4D images to 3D automatically
+* refactor(lib): remove unused list\_shape function
+* fix: accomodate python2.7 in Bbox division
+* test: bbox.subvoxel() vs pathological behavior of bbox.volume()
+* feat: support dtype on Bbox
+* fix: tests for subvoxel bounding box size were faulty
+* feat: vol.skeleton.get now accepts multiple segids
+
+0.41.0
+------
+
+* Version 0.41.0
+* allow reestablishing viewer server in the same python session (#169)
+* feat(skeletonservice): upload takes PrecomputedSkeleton as input
+
+0.40.4
+------
+
+* Version 0.40.4
+* perf(skeletonservice): faster component search ~3x
+* perf(skeletonservice): faster cable\_length operator
+
+0.40.3
+------
+
+* Version 0.40.3
+* fix: multiprocess upload crashes on thin non-aligned images (#168)
+* Bbox Upgrades (#167)
+
+0.40.2
+------
+
+* Version 0.40.2
+* feat(storage): Batch requests for GCS files\_exist() (#165)
+* docs: formatting
+* docs: info on serving local files
+* fix(skeletonservice): downsample was blowing stack
+
+0.40.1
+------
+
+* Version 0.40.1
+* perf(skeletonservice): made rendering components much faster
+* perf(skeletonservice): faster rendering of components
+* fix(skeletonservice): \_compute\_components wasn't treating loops correctly
+* refactor: moved skeleton exceptions into exceptions.py
+* feat: add chunk size info to non\_aligned\_write error message
+
+0.40.0
+------
+
+* Version 0.40.0
+* fix: transfer\_to retains Content-Type and respects existing info. (#157)
+* feat: cable\_length, downsample, improved Consolidation, SWC file support, connected components (#152)
+* vol.mesh.save() refactor path code (#158)
+* docs: update ChangeLog
+
+0.39.0
+------
+
+* Version 0.39.0
+* fix: uViewer hotkeys work for lower and upper case
+* feat: floating point images handle infinity and NaN in uViewer
+
+0.38.0
+------
+
+* Version 0.38.0
+* feat: add encoding parameter to "add\_scale"
+* feat: Storage works for any path, not just Neuroglancer paths (#154)
+* fix: ./, stepping 2 at a time in uViewer
+* feat: add offset to view in uViewer
 * test: s3 parallel read
 * docs: added reference to Google Storage setup
 * Update README.md

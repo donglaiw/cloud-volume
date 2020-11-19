@@ -1,18 +1,19 @@
 import pytest
 
 import copy
-import json
-import os
-import numpy as np
-import shutil
 import gzip
 import json
+import math
+import numpy as np
+import os
+import shutil
 
-from cloudvolume import CloudVolume, chunks, Storage, PrecomputedSkeleton
+from cloudvolume import CloudVolume, chunks, Storage, Skeleton
 from cloudvolume.storage import SimpleStorage
-from cloudvolume.lib import mkdir, Bbox, Vec
+from cloudvolume.lib import mkdir, Bbox, Vec, jsonify
 
-from cloudvolume.skeletonservice import SkeletonDecodeError
+from cloudvolume.datasource.precomputed.sharding import ShardingSpecification
+from cloudvolume.exceptions import SkeletonDecodeError, SkeletonAttributeMixingError
 
 info = CloudVolume.create_new_info(
   num_channels=1, # Increase this number when we add more tests for RGB
@@ -25,6 +26,15 @@ info = CloudVolume.create_new_info(
   volume_size=(100, 100, 100),
   chunk_size=(64, 64, 64),
 )
+
+skel_info = {
+  "@type": "neuroglancer_skeletons", 
+  "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], 
+  "vertex_attributes": [
+    {"id": "radius", "data_type": "float32", "num_components": 1}
+  ], 
+  "mip": 3,
+}
 
 def test_skeletons():
   
@@ -90,7 +100,7 @@ def test_skeletons():
   ], dtype=np.uint8)
 
   vol = CloudVolume('file:///tmp/cloudvolume/test-skeletons', info=info)
-  vol.skeleton.upload(
+  vol.skeleton.upload_raw(
     segid=1, vertices=vertices, edges=edges, 
     radii=radii, vertex_types=vertex_types
   )
@@ -101,7 +111,7 @@ def test_skeletons():
   assert np.all(skel.edges == edges)
   assert np.all(skel.radii == radii)
   assert np.all(skel.vertex_types == vertex_types)
-  assert vol.skeleton.path == 'skeletons'
+  assert vol.skeleton.meta.skeleton_path == 'skeletons'
   assert not skel.empty()
 
   with SimpleStorage('file:///tmp/cloudvolume/test-skeletons/') as stor:
@@ -123,7 +133,7 @@ def test_no_edges():
 
   edges = None
   vol = CloudVolume('file:///tmp/cloudvolume/test-skeletons', info=info)
-  vol.skeleton.upload(2, vertices, edges)
+  vol.skeleton.upload_raw(2, vertices, edges)
   skel = vol.skeleton.get(2)
 
   assert skel.id == 2
@@ -142,7 +152,7 @@ def test_no_vertices():
 
   edges = None
   vol = CloudVolume('file:///tmp/cloudvolume/test-skeletons', info=info)
-  vol.skeleton.upload(3, vertices, edges)
+  vol.skeleton.upload_raw(3, vertices, edges)
   skel = vol.skeleton.get(3)
 
   assert skel.id == 3
@@ -157,7 +167,7 @@ def test_no_vertices():
     stor.delete_file('skeletons/3')
 
 def test_consolidate():
-  skel = PrecomputedSkeleton(
+  skel = Skeleton(
     vertices=np.array([
       (0, 0, 0),
       (1, 0, 0),
@@ -188,7 +198,7 @@ def test_consolidate():
     ], dtype=np.uint8),
   )
 
-  correct_skel = PrecomputedSkeleton(
+  correct_skel = Skeleton(
     vertices=np.array([
       (0, 0, 0),
       (1, 0, 0),
@@ -225,27 +235,528 @@ def test_consolidate():
   assert np.all(consolidated.radii == correct_skel.radii)
   assert np.all(consolidated.vertex_types == correct_skel.vertex_types)
 
+def test_remove_disconnected_vertices():
+  skel = Skeleton(
+    [ 
+      (0,0,0), (1,0,0), (2,0,0),
+      (0,1,0), (0,2,0), (0,3,0),
+      (-1, -1, -1)
+    ], 
+    edges=[ 
+      (0,1), (1,2), 
+      (3,4), (4,5), (3,5)
+    ],
+    segid=666,
+  )
+
+  res = skel.remove_disconnected_vertices()
+  assert res.vertices.shape[0] == 6
+  assert res.edges.shape[0] == 5 
+  assert res.radii.shape[0] == 6
+  assert res.vertex_types.shape[0] == 6
+  assert res.id == 666
+
+
 def test_equivalent():
-  assert PrecomputedSkeleton.equivalent(PrecomputedSkeleton(), PrecomputedSkeleton())
+  assert Skeleton.equivalent(Skeleton(), Skeleton())
 
-  identity = PrecomputedSkeleton([ (0,0,0), (1,0,0) ], [(0,1)] )
-  assert PrecomputedSkeleton.equivalent(identity, identity)
+  identity = Skeleton([ (0,0,0), (1,0,0) ], [(0,1)] )
+  assert Skeleton.equivalent(identity, identity)
 
-  diffvertex = PrecomputedSkeleton([ (0,0,0), (0,1,0) ], [(0,1)])
-  assert not PrecomputedSkeleton.equivalent(identity, diffvertex)
+  diffvertex = Skeleton([ (0,0,0), (0,1,0) ], [(0,1)])
+  assert not Skeleton.equivalent(identity, diffvertex)
 
-  single1 = PrecomputedSkeleton([ (0,0,0), (1,0,0) ], edges=[ (1,0) ])
-  single2 = PrecomputedSkeleton([ (0,0,0), (1,0,0) ], edges=[ (0,1) ])
-  assert PrecomputedSkeleton.equivalent(single1, single2)
+  single1 = Skeleton([ (0,0,0), (1,0,0) ], edges=[ (1,0) ])
+  single2 = Skeleton([ (0,0,0), (1,0,0) ], edges=[ (0,1) ])
+  assert Skeleton.equivalent(single1, single2)
 
-  double1 = PrecomputedSkeleton([ (0,0,0), (1,0,0) ], edges=[ (1,0) ])
-  double2 = PrecomputedSkeleton([ (0,0,0), (1,0,0) ], edges=[ (0,1) ])
-  assert PrecomputedSkeleton.equivalent(double1, double2)
+  double1 = Skeleton([ (0,0,0), (1,0,0) ], edges=[ (1,0) ])
+  double2 = Skeleton([ (0,0,0), (1,0,0) ], edges=[ (0,1) ])
+  assert Skeleton.equivalent(double1, double2)
 
-  double1 = PrecomputedSkeleton([ (0,0,0), (1,0,0), (1,1,0) ], edges=[ (1,0), (1,2) ])
-  double2 = PrecomputedSkeleton([ (0,0,0), (1,0,0), (1,1,0) ], edges=[ (2,1), (0,1) ])
-  assert PrecomputedSkeleton.equivalent(double1, double2)
+  double1 = Skeleton([ (0,0,0), (1,0,0), (1,1,0) ], edges=[ (1,0), (1,2) ])
+  double2 = Skeleton([ (0,0,0), (1,0,0), (1,1,0) ], edges=[ (2,1), (0,1) ])
+  assert Skeleton.equivalent(double1, double2)
 
-  double1 = PrecomputedSkeleton([ (0,0,0), (1,0,0), (1,1,0), (1,1,3) ], edges=[ (1,0), (1,2), (1,3) ])
-  double2 = PrecomputedSkeleton([ (0,0,0), (1,0,0), (1,1,0), (1,1,3) ], edges=[ (3,1), (2,1), (0,1) ])
-  assert PrecomputedSkeleton.equivalent(double1, double2)
+  double1 = Skeleton([ (0,0,0), (1,0,0), (1,1,0), (1,1,3) ], edges=[ (1,0), (1,2), (1,3) ])
+  double2 = Skeleton([ (0,0,0), (1,0,0), (1,1,0), (1,1,3) ], edges=[ (3,1), (2,1), (0,1) ])
+  assert Skeleton.equivalent(double1, double2)
+
+def test_cable_length():
+  skel = Skeleton([ 
+      (0,0,0), (1,0,0), (2,0,0), (3,0,0), (4,0,0), (5,0,0)
+    ], 
+    edges=[ (1,0), (1,2), (2,3), (3,4), (5,4) ],
+    radii=[ 1, 2, 3, 4, 5, 6 ],
+    vertex_types=[1, 2, 3, 4, 5, 6]
+  )
+
+  assert skel.cable_length() == (skel.vertices.shape[0] - 1)
+
+  skel = Skeleton([ 
+      (2,0,0), (1,0,0), (0,0,0), (0,5,0), (0,6,0), (0,7,0)
+    ], 
+    edges=[ (1,0), (1,2), (2,3), (3,4), (5,4) ],
+    radii=[ 1, 2, 3, 4, 5, 6 ],
+    vertex_types=[1, 2, 3, 4, 5, 6]
+  )
+  assert skel.cable_length() == 9
+
+  skel = Skeleton([ 
+      (1,1,1), (0,0,0), (1,0,0)
+    ], 
+    edges=[ (1,0), (1,2) ],
+    radii=[ 1, 2, 3],
+    vertex_types=[1, 2, 3]
+  )
+  assert abs(skel.cable_length() - (math.sqrt(3) + 1)) < 1e-6
+
+def test_transform():
+  skelv = Skeleton([ 
+      (0,0,0), (1,0,0), (1,1,0), (1,1,3), (2,1,3), (2,2,3)
+    ], 
+    edges=[ (1,0), (1,2), (2,3), (3,4), (5,4) ],
+    radii=[ 1, 2, 3, 4, 5, 6 ],
+    vertex_types=[1, 2, 3, 4, 5, 6],
+    segid=1337,
+    transform=np.array([
+      [2, 0, 0, 0],
+      [0, 2, 0, 0],
+      [0, 0, 2, 0],
+    ])
+  )
+
+  skelp = skelv.physical_space()
+  assert np.all(skelp.vertices == skelv.vertices * 2)
+  assert np.all(skelv.vertices == skelp.voxel_space().vertices)
+
+  skelv.transform = [
+    [1, 0, 0, 1],
+    [0, 1, 0, 2],
+    [0, 0, 1, 3],
+  ]
+
+  skelp = skelv.physical_space()
+  tmpskel = skelv.clone() 
+  tmpskel.vertices[:,0] += 1
+  tmpskel.vertices[:,1] += 2
+  tmpskel.vertices[:,2] += 3
+  assert np.all(skelp.vertices == tmpskel.vertices)
+  assert np.all(skelp.voxel_space().vertices == skelv.vertices)
+
+
+def test_downsample():
+  skel = Skeleton([ 
+      (0,0,0), (1,0,0), (1,1,0), (1,1,3), (2,1,3), (2,2,3)
+    ], 
+    edges=[ (1,0), (1,2), (2,3), (3,4), (5,4) ],
+    radii=[ 1, 2, 3, 4, 5, 6 ],
+    vertex_types=[1, 2, 3, 4, 5, 6],
+    segid=1337,
+  )
+
+  def should_error(x):
+    try:
+      skel.downsample(x)
+      assert False
+    except ValueError:
+      pass
+
+  should_error(-1)
+  should_error(0)
+  should_error(.5)
+  should_error(2.00000000000001)
+
+  dskel = skel.downsample(1)
+  assert Skeleton.equivalent(dskel, skel)
+  assert dskel.id == skel.id
+  assert dskel.id == 1337
+
+  dskel = skel.downsample(2)
+  dskel_gt = Skeleton(
+    [ (0,0,0), (1,1,0), (2,1,3), (2,2,3) ], 
+    edges=[ (1,0), (1,2), (2,3) ],
+    radii=[1,3,5,6], vertex_types=[1,3,5,6] 
+  )
+  assert Skeleton.equivalent(dskel, dskel_gt)
+
+  dskel = skel.downsample(3)
+  dskel_gt = Skeleton(
+    [ (0,0,0), (1,1,3), (2,2,3) ], edges=[ (1,0), (1,2) ],
+    radii=[1,4,6], vertex_types=[1,4,6],
+  )
+  assert Skeleton.equivalent(dskel, dskel_gt)
+
+  skel = Skeleton([ 
+      (0,0,0), (1,0,0), (1,1,0), (1,1,3), (2,1,3), (2,2,3)
+    ], 
+    edges=[ (1,0), (1,2), (3,4), (5,4) ],
+    radii=[ 1, 2, 3, 4, 5, 6 ],
+    vertex_types=[1, 2, 3, 4, 5, 6]
+  )
+  dskel = skel.downsample(2)
+  dskel_gt = Skeleton(
+    [ (0,0,0), (1,1,0), (1,1,3), (2,2,3) ], 
+    edges=[ (1,0), (2,3) ],
+    radii=[1,3,4,6], vertex_types=[1,3,4,6] 
+  )
+  assert Skeleton.equivalent(dskel, dskel_gt)
+
+
+def test_downsample_joints():
+  skel = Skeleton([ 
+      
+                        (2, 3,0), # 0
+                        (2, 2,0), # 1
+                        (2, 1,0), # 2
+      (0,0,0), (1,0,0), (2, 0,0), (3,0,0), (4,0,0), # 3, 4, 5, 6, 7
+                        (2,-1,0), # 8
+                        (2,-2,0), # 9
+                        (2,-3,0), # 10
+
+    ], 
+    edges=[ 
+                  (0, 1),
+                  (1, 2),
+                  (2, 5),
+        (3,4), (4,5), (5, 6), (6,7),
+                  (5, 8),
+                  (8, 9),
+                  (9,10)
+    ],
+    radii=[ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ],
+    vertex_types=[ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ],
+    segid=1337,
+  )
+
+  ds_skel = skel.downsample(2)
+  ds_skel_gt = Skeleton([ 
+
+                        (2, 3,0), # 0
+                        
+                        (2, 2,0), # 1
+      (0,0,0),          (2, 0,0),     (4,0,0), # 2, 3, 4
+
+                        (2,-2,0), # 5                        
+                        (2,-3,0), # 6
+
+    ], 
+    edges=[ 
+                  (0,1),
+                  (1,3),
+              (2,3),  (3,4), 
+                  (3,5),
+                  (5,6)
+    ],
+    radii=[ 0, 1, 3, 5, 7, 9, 10 ],
+    vertex_types=[ 0, 1, 3, 5, 7, 9, 10 ],
+    segid=1337,
+  )
+
+  assert Skeleton.equivalent(ds_skel, ds_skel_gt)
+
+
+def test_read_swc():
+
+  # From http://research.mssm.edu/cnic/swc.html
+  test_file = """# ORIGINAL_SOURCE NeuronStudio 0.8.80
+# CREATURE
+# REGION
+# FIELD/LAYER
+# TYPE
+# CONTRIBUTOR
+# REFERENCE
+# RAW
+# EXTRAS
+# SOMA_AREA
+# SHINKAGE_CORRECTION 1.0 1.0 1.0
+# VERSION_NUMBER 1.0
+# VERSION_DATE 2007-07-24
+# SCALE 1.0 1.0 1.0
+1 1 14.566132 34.873772 7.857000 0.717830 -1
+2 0 16.022520 33.760513 7.047000 0.463378 1
+3 5 17.542000 32.604973 6.885001 0.638007 2
+4 0 19.163984 32.022469 5.913000 0.602284 3
+5 0 20.448090 30.822802 4.860000 0.436025 4
+6 6 21.897903 28.881084 3.402000 0.471886 5
+7 0 18.461960 30.289471 8.586000 0.447463 3
+8 6 19.420759 28.730757 9.558000 0.496217 7"""
+
+  skel = Skeleton.from_swc(test_file)
+  assert skel.vertices.shape[0] == 8
+  assert skel.edges.shape[0] == 7
+
+  skel_gt = Skeleton(
+    vertices=[
+      [14.566132, 34.873772, 7.857000],
+      [16.022520, 33.760513, 7.047000],
+      [17.542000, 32.604973, 6.885001],
+      [19.163984, 32.022469, 5.913000],
+      [20.448090, 30.822802, 4.860000],
+      [21.897903, 28.881084, 3.402000],
+      [18.461960, 30.289471, 8.586000],
+      [19.420759, 28.730757, 9.558000]
+    ],
+    edges=[ (0,1), (1,2), (2,3), (3,4), (4,5), (2,6), (7,6) ],
+    radii=[ 
+      0.717830, 0.463378, 0.638007, 0.602284, 
+      0.436025, 0.471886, 0.447463, 0.496217
+    ],
+    vertex_types=[
+      1, 0, 5, 0, 0, 6, 0, 6
+    ],
+  )
+
+  assert Skeleton.equivalent(skel, skel_gt)
+
+  skel = Skeleton.from_swc(skel.to_swc())
+  assert np.all(np.abs(skel.vertices - skel_gt.vertices) < 0.00001)
+  # sorts edges
+  skel = skel.consolidate()
+  skel_gt = skel_gt.consolidate()
+  assert np.all(skel.edges == skel_gt.edges)
+  assert np.all(np.abs(skel.radii - skel_gt.radii) < 0.00001)
+
+  Nv = skel.vertices.shape[0]
+  Ne = skel.edges.shape[0]
+
+  for _ in range(10):
+    skel = Skeleton.from_swc(skel.to_swc())
+    assert skel.vertices.shape[0] == Nv 
+    assert skel.edges.shape[0] == Ne
+
+
+def test_components():
+  skel = Skeleton(
+    [ 
+      (0,0,0), (1,0,0), (2,0,0),
+      (0,1,0), (0,2,0), (0,3,0),
+    ], 
+    edges=[ 
+      (0,1), (1,2), 
+      (3,4), (4,5), (3,5)
+    ],
+    segid=666,
+  )
+
+  components = skel.components()
+  assert len(components) == 2
+  assert components[0].vertices.shape[0] == 3
+  assert components[1].vertices.shape[0] == 3
+  assert components[0].edges.shape[0] == 2
+  assert components[1].edges.shape[0] == 3
+
+  skel1_gt = Skeleton([(0,0,0), (1,0,0), (2,0,0)], [(0,1), (1,2)])
+  skel2_gt = Skeleton([(0,1,0), (0,2,0), (0,3,0)], [(0,1), (0,2), (1,2)])
+
+  assert Skeleton.equivalent(components[0], skel1_gt)
+  assert Skeleton.equivalent(components[1], skel2_gt)
+
+def test_caching():
+  vol = CloudVolume('file:///tmp/cloudvolume/test-skeletons', 
+    info=info, cache=True)
+
+  vol.cache.flush()
+
+  skel = Skeleton(
+    [ 
+      (0,0,0), (1,0,0), (2,0,0),
+      (0,1,0), (0,2,0), (0,3,0),
+    ], 
+    edges=[ 
+      (0,1), (1,2), 
+      (3,4), (4,5), (3,5)
+    ],
+    segid=666,
+  )
+
+  vol.skeleton.upload(skel)
+
+  assert vol.cache.list_skeletons() == [ '666.gz' ]
+
+  skel.id = 1
+  with open(os.path.join(vol.cache.path, 'skeletons/1'), 'wb') as f:
+    f.write(skel.to_precomputed())
+
+  cached_skel = vol.skeleton.get(1)
+
+  assert cached_skel == skel
+
+  vol.cache.flush()
+
+
+def test_simple_merge():
+  skel1 = Skeleton(
+    [ (0,0,0), (1,0,0), (2,0,0),  ], 
+    edges=[ (0,1), (1,2), ],
+    segid=1,
+  )
+
+  skel2 = Skeleton(
+    [ (0,0,1), (1,0,2), (2,0,3),  ], 
+    edges=[ (0,1), (1,2), ],
+    segid=1,
+  )
+
+  result = Skeleton.simple_merge([ skel1, skel2 ])
+
+  expected = Skeleton(
+    [ (0,0,0), (1,0,0), (2,0,0), (0,0,1), (1,0,2), (2,0,3), ], 
+    edges=[ (0,1), (1,2), (3,4), (4,5) ],
+    segid=1,
+  )
+
+  assert result == expected
+
+  skel1.extra_attributes = [{
+    "id": "wow",
+    "data_type": "uint8",
+    "components": 1,
+  }]
+  skel1.wow = np.array([1,2,3], dtype=np.uint8)
+
+  skel2.extra_attributes = [{
+    "id": "wow",
+    "data_type": "uint8",
+    "components": 1,
+  }]
+  skel2.wow = np.array([4,5,6], dtype=np.uint8)
+
+  result = Skeleton.simple_merge([ skel1, skel2 ])
+  expected.wow = np.array([1,2,3,4,5,6], dtype=np.uint8)
+
+  assert result == expected
+
+  skel2.extra_attributes[0]['data_type'] = np.uint8
+
+  try:
+    Skeleton.simple_merge([ skel1, skel2 ])
+    assert False
+  except SkeletonAttributeMixingError:
+    pass
+
+  skel2.extra_attributes[0]['data_type'] = 'uint8'
+  skel2.extra_attributes.append({
+    "id": "amaze",
+    "data_type": "float32",
+    "components": 2,
+  })
+
+  try:
+    Skeleton.simple_merge([ skel1, skel2 ])
+    assert False
+  except SkeletonAttributeMixingError:
+    pass
+
+def test_sharded():
+  skel = Skeleton(
+    [ 
+      (0,0,0), (1,0,0), (2,0,0),
+      (0,1,0), (0,2,0), (0,3,0),
+    ], 
+    edges=[ 
+      (0,1), (1,2), 
+      (3,4), (4,5), (3,5)
+    ],
+    segid=1,
+    extra_attributes=[
+      {
+          "id": "radius",
+          "data_type": "float32",
+          "num_components": 1,
+      }
+    ]
+  ).physical_space()
+
+  skels = {}
+  for i in range(10):
+    sk = skel.clone()
+    sk.id = i
+    skels[i] = sk.to_precomputed()
+
+  mkdir('/tmp/removeme/skeletons/sharded/skeletons')
+  with open('/tmp/removeme/skeletons/sharded/info', 'wt') as f:
+    f.write(jsonify(info))
+
+  for idxenc in ('raw', 'gzip'):
+    for dataenc in ('raw', 'gzip'):
+
+      spec = ShardingSpecification(
+        'neuroglancer_uint64_sharded_v1', 
+        preshift_bits=1,
+        hash='murmurhash3_x86_128', 
+        minishard_bits=2, 
+        shard_bits=1, 
+        minishard_index_encoding=idxenc, 
+        data_encoding=dataenc,
+      )
+      skel_info['sharding'] = spec.to_dict()
+
+      with open('/tmp/removeme/skeletons/sharded/skeletons/info', 'wt') as f:
+        f.write(jsonify(skel_info))
+
+      files = spec.synthesize_shards(skels)
+      for fname in files.keys():
+        with open('/tmp/removeme/skeletons/sharded/skeletons/' + fname, 'wb') as f:
+          f.write(files[fname])      
+
+      cv = CloudVolume('file:///tmp/removeme/skeletons/sharded/')
+      assert cv.skeleton.meta.mip == 3
+
+      for i in range(10):
+        sk = cv.skeleton.get(i).physical_space()
+        sk.id = 1
+        assert sk == skel
+
+      labels = []
+      for fname in files.keys():
+        lbls = cv.skeleton.reader.list_labels(fname, path='skeletons')
+        labels += list(lbls)
+      
+      labels.sort()
+      assert labels == list(range(10))
+
+      for filename, shard in files.items():
+        decoded_skels = cv.skeleton.reader.disassemble_shard(shard)
+        for label, binary in decoded_skels.items():
+          Skeleton.from_precomputed(binary)
+
+      exists = cv.skeleton.reader.exists(list(range(11)), path='skeletons')
+      assert exists == {
+        0: 'skeletons/0.shard', 
+        1: 'skeletons/0.shard', 
+        2: 'skeletons/0.shard', 
+        3: 'skeletons/0.shard', 
+        4: 'skeletons/0.shard', 
+        5: 'skeletons/0.shard', 
+        6: 'skeletons/0.shard', 
+        7: 'skeletons/0.shard', 
+        8: 'skeletons/1.shard', 
+        9: 'skeletons/1.shard',
+        10: None,
+      }
+
+  shutil.rmtree('/tmp/removeme/skeletons')
+
+def test_spatial_index():
+  test_dir = os.path.dirname(os.path.abspath(__file__))
+  vol = CloudVolume('file://{}/test_cv'.format(test_dir))
+  
+  spatial_index = vol.skeleton.spatial_index
+
+  spatial_index.query(vol.bounds * vol.resolution)
+
+  locs = spatial_index.file_locations_per_label()
+  assert 71297420 in locs
+  assert locs[71297420] == ['0-8192_0-8192_0-20480.spatial']
+
+  locs = spatial_index.file_locations_per_label(labels=[71297420])
+  assert 71297420 in locs
+  assert locs[71297420] == ['0-8192_0-8192_0-20480.spatial']
+
+  bbox = spatial_index.get_bbox(59524925)
+  assert bbox == Bbox([80, 6864, 19960], [400, 8176, 20440])
+
+
+
+

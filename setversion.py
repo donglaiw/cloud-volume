@@ -21,6 +21,13 @@ def materialize_version(version):
 	with open('cloudvolume/__init__.py', 'wt') as f:
 		f.write(code)
 
+	with open('setup.py', 'rt') as f:
+		code = f.read()
+
+	code = re.sub(r'version\s*=\s*".*?",', 'version="{}",'.format(version), code)
+	with open('setup.py', 'wt') as f:
+		f.write(code)
+
 version = sys.argv[1]
 message = sys.argv[2]
 
@@ -28,7 +35,7 @@ materialize_version(version)
 print("Updated __init__.py with version " + version)
 
 assert len(version) < 9
-subprocess.check_output("git reset && git add cloudvolume/__init__.py && git commit -m 'Version {}'".format(version), shell=True)
+subprocess.check_output("git reset && git add cloudvolume/__init__.py setup.py && git commit -m 'Version {}'".format(version), shell=True)
 
 try:
 	subprocess.check_output(['git', 'tag', '-a',  version, '-m', message])

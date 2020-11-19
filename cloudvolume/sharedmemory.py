@@ -1,22 +1,17 @@
+from collections import defaultdict
 import errno
 import math
 import mmap
 import os
 import sys
+import time
 
 import multiprocessing as mp
 
 from six.moves import range
-import posix_ipc
-from posix_ipc import O_CREAT
 import numpy as np
-import psutil
-
-import time
 
 from .lib import Bbox, Vec, mkdir
-
-mmaps = []
 
 SHM_DIRECTORY = '/dev/shm/'
 EMULATED_SHM_DIRECTORY = '/tmp/cloudvolume-shm'
@@ -29,21 +24,6 @@ class SharedMemoryReadError(Exception):
 
 class SharedMemoryAllocationError(Exception):
   pass
-
-def reinit():
-  """For use after a process fork only. Trashes bad file descriptors and resets tracking."""
-  global mmaps
-  mmaps = []
-
-def bbox2array(vol, bbox, order='F', readonly=False, lock=None, location=None):
-  """Convenince method for creating a 
-  shared memory numpy array based on a CloudVolume
-  and Bbox. c.f. sharedmemory.ndarray for information
-  on the optional lock parameter."""
-  location = location or vol.shared_memory_id
-  shape = list(bbox.size3()) + [ vol.num_channels ]
-  return ndarray(shape=shape, dtype=vol.dtype, location=location, 
-    readonly=readonly, lock=lock, order=order)
 
 def ndarray(shape, dtype, location, order='F', readonly=False, lock=None, **kwargs):
   """
@@ -69,19 +49,44 @@ def ndarray(shape, dtype, location, order='F', readonly=False, lock=None, **kwar
   Returns: (mmap filehandle, shared ndarray)
   """
   if EMULATE_SHM:
-    return ndarray_fs(shape, dtype, location, lock, readonly, order, **kwargs)
+    return ndarray_fs(
+      shape, dtype, location, lock, 
+      readonly, order, emulate_shm=True, **kwargs
+    )
   return ndarray_shm(shape, dtype, location, readonly, order, **kwargs)
 
-def ndarray_fs(shape, dtype, location, lock, readonly=False, order='F', **kwargs):
+def ndarray_fs(
+    shape, dtype, location, lock, 
+    readonly=False, order='F', emulate_shm=False,
+    **kwargs
+  ):
   """Emulate shared memory using the filesystem."""
   dbytes = np.dtype(dtype).itemsize
   nbytes = Vec(*shape).rectVolume() * dbytes
-  directory = mkdir(EMULATED_SHM_DIRECTORY)
-  filename = os.path.join(directory, location)
+
+  if emulate_shm:
+    directory = mkdir(EMULATED_SHM_DIRECTORY)
+    filename = os.path.join(directory, location)
+  else:
+    filename = location
 
   if lock:
     lock.acquire()
 
+  try:
+    allocate_shm_file(filename, nbytes, dbytes, readonly)
+  finally:
+    if lock:
+      lock.release()
+
+  with open(filename, 'r+b') as f:
+    array_like = mmap.mmap(f.fileno(), 0) # map entire file
+  
+  renderbuffer = np.ndarray(buffer=array_like, dtype=dtype, shape=shape, order=order, **kwargs)
+  renderbuffer.setflags(write=(not readonly))
+  return array_like, renderbuffer
+
+def allocate_shm_file(filename, nbytes, dbytes, readonly):
   exists = os.path.exists(filename)
   size = 0 if not exists else os.path.getsize(filename)
 
@@ -98,34 +103,32 @@ def ndarray_fs(shape, dtype, location, lock, readonly=False, order='F', **kwargs
         os.ftruncate(f.fileno(), nbytes)
     elif size < nbytes:
       # too small? just remake it below
-      # if we were being more efficient
-      # we could just append zeros
       os.unlink(filename) 
 
   exists = os.path.exists(filename)
 
   if not exists:
-    blocksize = 1024 * 1024 * 10 * dbytes
-    steps = int(math.ceil(float(nbytes) / float(blocksize)))
-    total = 0
+    # Previously we were writing out real files full of zeros, 
+    # but a) that takes forever and b) modern OSes support sparse
+    # files (i.e. gigabytes of zeros that take up only a few real bytes).
+    #
+    # The following should take advantage of this functionality and be faster.
+    # It should work on Python 2.7 Unix, and Python 3.5+ on Unix and Windows.
+    #
+    # References:
+    #   https://stackoverflow.com/questions/8816059/create-file-of-particular-size-in-python
+    #   https://docs.python.org/3/library/os.html#os.ftruncate
+    #   https://docs.python.org/2/library/os.html#os.ftruncate
+    #
     with open(filename, 'wb') as f:
-      for i in range(0, steps):
-        write_bytes = min(blocksize, nbytes - total)
-        f.write(b'\x00' * write_bytes)
-        total += blocksize
-
-  if lock:
-    lock.release()
-
-  with open(filename, 'r+b') as f:
-    array_like = mmap.mmap(f.fileno(), 0) # map entire file
-  
-  renderbuffer = np.ndarray(buffer=array_like, dtype=dtype, shape=shape, order=order, **kwargs)
-  renderbuffer.setflags(write=(not readonly))
-  return array_like, renderbuffer
+      os.ftruncate(f.fileno(), nbytes)
 
 def ndarray_shm(shape, dtype, location, readonly=False, order='F', **kwargs):
   """Create a shared memory numpy array. Requires /dev/shm to exist."""
+  import posix_ipc
+  from posix_ipc import O_CREAT
+  import psutil
+
   nbytes = Vec(*shape).rectVolume() * np.dtype(dtype).itemsize
   available = psutil.virtual_memory().available
 
@@ -181,24 +184,13 @@ def ndarray_shm(shape, dtype, location, readonly=False, order='F', **kwargs):
   renderbuffer.setflags(write=(not readonly))
   return array_like, renderbuffer
 
-def track_mmap(array_like):
-  global mmaps
-  mmaps.append(array_like)
-
-def cleanup():
-  global mmaps 
-
-  for array_like in mmaps:
-    if not array_like.closed:
-      array_like.close()
-  mmaps = []
-
 def unlink(location):
   if EMULATE_SHM:
     return unlink_fs(location)
   return unlink_shm(location)
 
 def unlink_shm(location):
+  import posix_ipc
   try:
     posix_ipc.unlink_shared_memory(location)
   except posix_ipc.ExistentialError:

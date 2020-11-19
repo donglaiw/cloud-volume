@@ -8,37 +8,53 @@ import os
 import shutil
 import sys
 
-from functools import reduce
-
-from cloudvolume import CloudVolume, chunks, Storage
-from cloudvolume.lib import mkdir, Bbox, Vec, yellow
+from cloudvolume import exceptions
+from cloudvolume.exceptions import AlignmentError, ReadOnlyException
+from cloudvolume import CloudVolume, chunks
+from cloudvolume.lib import Bbox, Vec, yellow, mkdir
 import cloudvolume.sharedmemory as shm
 from layer_harness import (
-  TEST_NUMBER, create_image, 
-  delete_layer, create_layer,
-  create_volume_from_image
+  TEST_NUMBER,  
+  delete_layer, create_layer
 )
-from cloudvolume import txrx
+from cloudvolume.datasource.precomputed.common import cdn_cache_control
+from cloudvolume.datasource.precomputed.image.tx import generate_chunks
+
+def test_from_numpy():
+  arr = np.random.randint(0, high=256, size=(128,128, 128))
+  arr = np.asarray(arr, dtype=np.uint8)
+  vol = CloudVolume.from_numpy(arr, max_mip=1)
+  arr2 = vol[:,:,:]
+  np.alltrue(arr == arr2)
+  
+  arr = np.random.randn(128,128, 128, 3)
+  arr = np.asarray(arr, dtype=np.float32)
+  vol = CloudVolume.from_numpy(arr, max_mip=1)
+  arr2 = vol[:,:,:]
+  np.alltrue(arr == arr2)
+  shutil.rmtree('/tmp/image')
 
 def test_cloud_access():
-  vol = CloudVolume('gs://seunglab-test/test_v0/image')
-  vol = CloudVolume('s3://seunglab-test/test_dataset/image')
+  CloudVolume('gs://seunglab-test/test_v0/image')
+  CloudVolume('s3://seunglab-test/test_dataset/image')
 
 def test_fill_missing():
   info = CloudVolume.create_new_info(
-  num_channels=1, # Increase this number when we add more tests for RGB
-  layer_type='image', 
-  data_type='uint8', 
-  encoding='raw',
-  resolution=[ 1,1,1 ], 
-  voxel_offset=[0,0,0], 
-  volume_size=[128,128,64],
-  mesh='mesh', 
-  chunk_size=[ 64,64,64 ],
+    num_channels=1, # Increase this number when we add more tests for RGB
+    layer_type='image', 
+    data_type='uint8', 
+    encoding='raw',
+    resolution=[ 1,1,1 ], 
+    voxel_offset=[0,0,0], 
+    volume_size=[128,128,64],
+    mesh='mesh', 
+    chunk_size=[ 64,64,64 ],
   )
 
   vol = CloudVolume('file:///tmp/cloudvolume/empty_volume', mip=0, info=info)
   vol.commit_info()
+
+  vol.cache.flush()
 
   vol = CloudVolume('file:///tmp/cloudvolume/empty_volume', mip=0, fill_missing=True)
   assert np.count_nonzero(vol[:]) == 0
@@ -50,63 +66,177 @@ def test_fill_missing():
   vol.cache.flush()
   delete_layer('/tmp/cloudvolume/empty_volume')
 
-def test_aligned_read():
+def test_has_data():
   delete_layer()
   cv, data = create_layer(size=(50,50,50,1), offset=(0,0,0))
+  cv.add_scale((2,2,1))
+
+  assert cv.image.has_data(0) == True
+  assert cv.image.has_data(1) == False
+  assert cv.image.has_data([1,1,1]) == True
+  assert cv.image.has_data([2,2,1]) == False
+
+  try:
+    cv.image.has_data(2)
+    assert False
+  except exceptions.ScaleUnavailableError:
+    pass
+
+def image_equal(arr1, arr2, encoding):
+  assert arr1.shape == arr2.shape
+  if encoding == 'raw':
+    return np.all(arr1 == arr2)
+
+  # jpeg
+  u1 = arr1.flatten().mean()
+  u2 = arr2.flatten().mean()
+  return np.abs(u1 - u2) < 1
+
+@pytest.mark.parametrize('green', (True, False))
+@pytest.mark.parametrize('encoding', ('raw', 'jpeg'))
+def test_aligned_read(green, encoding):
+  delete_layer()
+  cv, data = create_layer(size=(50,50,50,1), offset=(0,0,0), encoding=encoding)
+  cv.green_threads = green
   # the last dimension is the number of channels
   assert cv[0:50,0:50,0:50].shape == (50,50,50,1)
-  assert np.all(cv[0:50,0:50,0:50] == data)
+  assert image_equal(cv[0:50,0:50,0:50], data, encoding)
   
   delete_layer()
-  cv, data = create_layer(size=(128,64,64,1), offset=(0,0,0))
+  cv, data = create_layer(size=(128,64,64,1), offset=(0,0,0), encoding=encoding)
+  cv.green_threads = green
   # the last dimension is the number of channels
   assert cv[0:64,0:64,0:64].shape == (64,64,64,1) 
-  assert np.all(cv[0:64,0:64,0:64] ==  data[:64,:64,:64,:])
+
+  assert image_equal(cv[0:64,0:64,0:64], data[:64,:64,:64,:], encoding)
 
   delete_layer()
-  cv, data = create_layer(size=(128,64,64,1), offset=(10,20,0))
+  cv, data = create_layer(size=(128,64,64,1), offset=(10,20,0), encoding=encoding)
+  cv.green_threads = green
   cutout = cv[10:74,20:84,0:64]
   # the last dimension is the number of channels
   assert cutout.shape == (64,64,64,1) 
-  assert np.all(cutout == data[:64,:64,:64,:])
+  assert image_equal(cutout, data[:64,:64,:64,:], encoding)
   # get the second chunk
   cutout2 = cv[74:138,20:84,0:64]
   assert cutout2.shape == (64,64,64,1) 
-  assert np.all(cutout2 == data[64:128,:64,:64,:])
+  assert image_equal(cutout2, data[64:128,:64,:64,:], encoding)
+
+  assert cv[25, 25, 25].shape == (1,1,1,1)
+
+def test_save_images():
+  delete_layer()
+  cv, data = create_layer(size=(50,50,50,1), offset=(0,0,0))  
+
+  img = cv[:]
+  directory = img.save_images()
+
+  for z, fname in enumerate(sorted(os.listdir(directory))):
+    assert fname == str(z).zfill(3) + '.png'
+
+  shutil.rmtree(directory)
+
+def test_bbox_read():
+  delete_layer()
+  cv, data = create_layer(size=(50,50,50,1), offset=(0,0,0))
+
+  x = Bbox( (0,1,2), (48,49,50) )
+  # the last dimension is the number of channels
+  assert cv[x].shape == (48,48,48,1)
+  assert np.all(cv[x] == data[0:48, 1:49, 2:50])  
+
+def test_number_type_read():
+  delete_layer()
+  cv, data = create_layer(size=(50,50,50,1), offset=(0,0,0))
+
+  for datatype in (
+    np.uint8, np.uint16, np.uint32, np.uint64,
+    np.int8, np.int16, np.int32, np.int64,
+    np.float16, np.float32, np.float64,
+    int, float
+  ):
+    x = datatype(5)
+
+    # the last dimension is the number of channels
+    assert cv[x,x,x].shape == (1,1,1,1)
+    assert np.all(cv[x,x,x] == data[5,5,5])  
+
+def test_ellipsis_read():
+  delete_layer()
+  cv, data = create_layer(size=(50,50,50,1), offset=(0,0,0))
+
+  img = cv[...]
+  assert np.all(img == data)
+
+  img = cv[5:10, ...]
+  assert np.all(img == data[5:10, :,:,:])
+
+  img = cv[5:10, 7, 8, ...]
+  assert np.all(np.squeeze(img) == data[5:10, 7, 8, 0])
+
+  img = cv[5:10, ..., 8, 0]
+  assert np.all(np.squeeze(img) == data[5:10, :, 8, 0])
+
+  try:
+    img = cv[..., 5, ..., 0]
+  except ValueError:
+    pass
 
 
-def test_parallel_read():
-  paths = [
-    'gs://seunglab-test/test_v0/image',
-    's3://seunglab-test/test_v0/image',
-  ]
+@pytest.mark.parametrize('protocol', ('gs', 's3'))
+@pytest.mark.parametrize('parallel', (2, True))
+def test_parallel_read(protocol, parallel):
+  cloudpath = "{}://seunglab-test/test_v0/image".format(protocol)
 
-  for cloudpath in paths:
-    vol1 = CloudVolume(cloudpath, parallel=1)
-    vol2 = CloudVolume(cloudpath, parallel=2)
+  vol1 = CloudVolume(cloudpath, parallel=1)
+  vol2 = CloudVolume(cloudpath, parallel=parallel)
 
-    data1 = vol1[:512,:512,:50]
-    assert np.all(data1 == vol2[:512,:512,:50])
+  data1 = vol1[:512,:512,:50]
+  img = vol2[:512,:512,:50]
+  assert np.all(data1 == vol2[:512,:512,:50])
 
-    data2 = vol2.download_to_shared_memory(np.s_[:512,:512,:50])
-    assert np.all(data1 == data2)
-    data2.close()
-    vol2.unlink_shared_memory()
+
+@pytest.mark.parametrize('protocol', ('gs', 's3'))
+def test_parallel_read_shm(protocol):
+  cloudpath = "{}://seunglab-test/test_v0/image".format(protocol)
+  
+  vol1 = CloudVolume(cloudpath, parallel=1)
+  vol2 = CloudVolume(cloudpath, parallel=2)
+
+  data1 = vol1[:512,:512,:50]
+  data2 = vol2.download_to_shared_memory(np.s_[:512,:512,:50])
+  assert np.all(data1 == data2)
+  data2.close()
+  vol2.unlink_shared_memory()
 
 def test_parallel_write():
   delete_layer()
   cv, data = create_layer(size=(512,512,128,1), offset=(0,0,0))
   
+  # aligned write
   cv.parallel = 2
   cv[:] = np.zeros(shape=(512,512,128,1), dtype=cv.dtype) + 5
   data = cv[:]
   assert np.all(data == 5)
-  del data
-  cv.unlink_shared_memory()
+
+  # non-aligned-write
+  cv.parallel = 2
+  cv.non_aligned_writes = True
+  cv[1:,1:,1:] = np.zeros(shape=(511,511,127,1), dtype=cv.dtype) + 7
+  data = cv[1:,1:,1:]
+  assert np.all(data == 7)
+
+  # thin non-aligned-write so that there's no aligned core
+  cv.parallel = 2
+  cv.non_aligned_writes = True
+  cv[25:75,25:75,25:75] = np.zeros(shape=(50,50,50,1), dtype=cv.dtype) + 8
+  data = cv[25:75,25:75,25:75]
+  assert np.all(data == 8)
+
 
 def test_parallel_shared_memory_write():
   delete_layer()
-  cv, data = create_layer(size=(256,256,128,1), offset=(0,0,0))
+  cv, _ = create_layer(size=(256,256,128,1), offset=(0,0,0))
 
   shm_location = 'cloudvolume-test-shm-parallel-write'
   mmapfh, shareddata = shm.ndarray(shape=(256,256,128), dtype=np.uint8, location=shm_location)
@@ -204,40 +334,66 @@ def test_autocropped_read():
   assert img.shape == (0,0,0,1)
   assert np.all(img == data[0:0, 0:0, 0:0])    
 
-def test_write():
+@pytest.mark.parametrize('green', (True, False))
+def test_download_upload_file(green):
   delete_layer()
-  cv, data = create_layer(size=(50,50,50,1), offset=(0,0,0))
+  cv, _ = create_layer(size=(50,50,50,1), offset=(0,0,0))
+  cv.green_threads = green
+
+  mkdir('/tmp/file/')
+
+  cv.download_to_file('/tmp/file/test', cv.bounds)
+  cv2 = CloudVolume('file:///tmp/file/test2/', info=cv.info)
+  cv2.upload_from_file('/tmp/file/test', cv.bounds)
+
+  assert np.all(cv2[:] == cv[:])
+  shutil.rmtree('/tmp/file/')
+
+@pytest.mark.parametrize('green', (True, False))
+@pytest.mark.parametrize('encoding', ('raw', 'jpeg'))
+def test_write(green, encoding):
+  delete_layer()
+  cv, _ = create_layer(size=(50,50,50,1), offset=(0,0,0))
+  cv.green_threads = green
 
   replacement_data = np.zeros(shape=(50,50,50,1), dtype=np.uint8)
   cv[0:50,0:50,0:50] = replacement_data
-  assert np.all(cv[0:50,0:50,0:50] == replacement_data)
+  assert image_equal(cv[0:50,0:50,0:50], replacement_data, encoding)
 
   replacement_data = np.random.randint(255, size=(50,50,50,1), dtype=np.uint8)
   cv[0:50,0:50,0:50] = replacement_data
-  assert np.all(cv[0:50,0:50,0:50] == replacement_data)
+  assert image_equal(cv[0:50,0:50,0:50], replacement_data, encoding)
+
+  replacement_data = np.random.randint(255, size=(50,50,50,1), dtype=np.uint8)
+  bbx = Bbox((0,0,0), (50,50,50))
+  cv[bbx] = replacement_data
+  assert image_equal(cv[bbx], replacement_data, encoding)
 
   # out of bounds
   delete_layer()
-  cv, data = create_layer(size=(128,64,64,1), offset=(10,20,0))
+  cv, _ = create_layer(size=(128,64,64,1), offset=(10,20,0))
+  cv.green_threads = green
   with pytest.raises(ValueError):
     cv[74:150,20:84,0:64] = np.ones(shape=(64,64,64,1), dtype=np.uint8)
   
   # non-aligned writes
   delete_layer()
-  cv, data = create_layer(size=(128,64,64,1), offset=(10,20,0))
+  cv, _ = create_layer(size=(128,64,64,1), offset=(10,20,0))
+  cv.green_threads = green
   with pytest.raises(ValueError):
     cv[21:85,0:64,0:64] = np.ones(shape=(64,64,64,1), dtype=np.uint8)
 
   # test bounds check for short boundary chunk
   delete_layer()
-  cv, data = create_layer(size=(25,25,25,1), offset=(1,3,5))
+  cv, _ = create_layer(size=(25,25,25,1), offset=(1,3,5))
+  cv.green_threads = green
   cv.info['scales'][0]['chunk_sizes'] = [[ 11,11,11 ]]
   cv[:] = np.ones(shape=(25,25,25,1), dtype=np.uint8)
 
 def test_non_aligned_write():
   delete_layer()
   offset = Vec(5,7,13)
-  cv, data = create_layer(size=(1024, 1024, 5, 1), offset=offset)
+  cv, _ = create_layer(size=(1024, 1024, 5, 1), offset=offset)
 
   cv[:] = np.zeros(shape=cv.shape, dtype=cv.dtype)
 
@@ -247,9 +403,9 @@ def test_non_aligned_write():
   try:
     cv[ onepx.to_slices() ] = np.ones(shape=onepx.size3(), dtype=cv.dtype)
     assert False
-  except txrx.AlignmentError:
+  except AlignmentError:
     pass
-
+  
   cv.non_aligned_writes = True
   cv[ onepx.to_slices() ] = np.ones(shape=onepx.size3(), dtype=cv.dtype)
   answer = np.zeros(shape=cv.shape, dtype=cv.dtype)
@@ -269,19 +425,19 @@ def test_non_aligned_write():
   try:
     cv[ middle.to_slices() ] = np.ones(shape=middle.size3(), dtype=cv.dtype)
     assert False
-  except txrx.AlignmentError:
+  except AlignmentError:
     pass
 
   # Big inner shell
   delete_layer()
-  cv, data = create_layer(size=(1024, 1024, 5, 1), offset=offset)
+  cv, _ = create_layer(size=(1024, 1024, 5, 1), offset=offset)
   cv[:] = np.zeros(shape=cv.shape, dtype=cv.dtype)
   middle = Bbox( (512 - 150, 512 - 150, 0), (512 + 150, 512 + 150, 5) ) + offset
 
   try:
     cv[ middle.to_slices() ] = np.ones(shape=middle.size3(), dtype=cv.dtype)
     assert False
-  except txrx.AlignmentError:
+  except AlignmentError:
     pass
 
   cv.non_aligned_writes = True
@@ -290,9 +446,11 @@ def test_non_aligned_write():
   answer[ 362:662, 362:662, : ] = 1
   assert np.all(cv[:] == answer)    
 
+from cloudvolume import view
+
 def test_autocropped_write():
   delete_layer()
-  cv, data = create_layer(size=(100,100,100,1), offset=(0,0,0))
+  cv, _ = create_layer(size=(100,100,100,1), offset=(0,0,0))
 
   cv.autocrop = True
   cv.bounded = False
@@ -322,7 +480,7 @@ def test_writer_last_chunk_smaller():
   cv, data = create_layer(size=(100,64,64,1), offset=(0,0,0))
   cv.info['scales'][0]['chunk_sizes'] = [[ 64,64,64 ]]
   
-  chunks = [ chunk for chunk in txrx.generate_chunks(cv, data[:,:,:,:], (0,0,0)) ]
+  chunks = [ chunk for chunk in generate_chunks(cv.meta, data[:,:,:,:], (0,0,0), cv.mip) ]
 
   assert len(chunks) == 2
 
@@ -382,14 +540,14 @@ def test_negative_coords_upload_download():
 
 def test_setitem_mismatch():
   delete_layer()
-  cv, data = create_layer(size=(64,64,64,1), offset=(0,0,0))
+  cv, _ = create_layer(size=(64,64,64,1), offset=(0,0,0))
 
   with pytest.raises(ValueError):
     cv[0:64,0:64,0:64] = np.zeros(shape=(5,5,5,1), dtype=np.uint8)
 
 def test_bounds():
   delete_layer()
-  cv, data = create_layer(size=(128,64,64,1), offset=(100,100,100))
+  cv, _ = create_layer(size=(128,64,64,1), offset=(100,100,100))
   cv.bounded = True
 
   try:
@@ -416,10 +574,16 @@ def test_bounds():
 
 def test_provenance():
   delete_layer()
-  cv, data = create_layer(size=(64,64,64,1), offset=(0,0,0))
+  cv, _ = create_layer(size=(64,64,64,1), offset=(0,0,0))
 
   provobj = json.loads(cv.provenance.serialize())
-  assert provobj == {"sources": [], "owners": [], "processing": [], "description": ""}
+  provobj['processing'] = [] # from_numpy
+  assert provobj == {
+    "sources": [], 
+    "owners": [], 
+    "processing": [], 
+    "description": ""
+  }
 
   cv.provenance.sources.append('cooldude24@princeton.edu')
   cv.commit_provenance()
@@ -449,10 +613,10 @@ def test_provenance():
 
 def test_info_provenance_cache():
   image = np.zeros(shape=(128,128,128,1), dtype=np.uint8)
-  vol = create_volume_from_image(
-    image=image, 
-    offset=(0,0,0), 
-    layer_path='gs://seunglab-test/cloudvolume/caching', 
+  vol = CloudVolume.from_numpy(
+    image, 
+    voxel_offset=(0,0,0), 
+    vol_path='gs://seunglab-test/cloudvolume/caching', 
     layer_type='image', 
     resolution=(1,1,1), 
     encoding='raw'
@@ -524,13 +688,14 @@ def test_caching():
   dirpath = '/tmp/cloudvolume/caching-volume-' + str(TEST_NUMBER)
   layer_path = 'file://' + dirpath
 
-  vol = create_volume_from_image(
-    image=image, 
-    offset=(0,0,0), 
-    layer_path=layer_path, 
+  vol = CloudVolume.from_numpy(
+    image, 
+    voxel_offset=(0,0,0), 
+    vol_path=layer_path, 
     layer_type='image', 
     resolution=(1,1,1), 
-    encoding='raw'
+    encoding='raw',
+    chunk_size=(64,64,64),
   )
 
   vol.cache.enabled = True
@@ -592,7 +757,8 @@ def test_caching():
 
   # Test Non-standard Cache Destination
   dirpath = '/tmp/cloudvolume/caching-cache-' + str(TEST_NUMBER)
-  vol.cache.enabled = dirpath
+  vol.cache.enabled = True
+  vol.cache.path = dirpath
   vol[:,:,:] = image
 
   assert len(os.listdir(os.path.join(dirpath, vol.key))) == 8
@@ -659,10 +825,10 @@ def test_cache_compression_setting():
   dirpath = '/tmp/cloudvolume/caching-validity-' + str(TEST_NUMBER)
   layer_path = 'file://' + dirpath
 
-  vol = create_volume_from_image(
-    image=image, 
-    offset=(1,1,1), 
-    layer_path=layer_path, 
+  vol = CloudVolume.from_numpy(
+    image, 
+    voxel_offset=(1,1,1), 
+    vol_path=layer_path, 
     layer_type='image', 
     resolution=(1,1,1), 
     encoding='raw'
@@ -693,10 +859,10 @@ def test_cache_validity():
   dirpath = '/tmp/cloudvolume/caching-validity-' + str(TEST_NUMBER)
   layer_path = 'file://' + dirpath
 
-  vol = create_volume_from_image(
-    image=image, 
-    offset=(1,1,1), 
-    layer_path=layer_path, 
+  vol = CloudVolume.from_numpy(
+    image, 
+    voxel_offset=(1,1,1), 
+    vol_path=layer_path, 
     layer_type='image', 
     resolution=(1,1,1), 
     encoding='raw'
@@ -757,7 +923,7 @@ def test_cache_validity():
 def test_pickling():
   import pickle
   delete_layer()
-  cv, data = create_layer(size=(128,64,64,1), offset=(0,0,0))
+  cv, _ = create_layer(size=(128,64,64,1), offset=(0,0,0))
 
   pckl = pickle.dumps(cv)
   cv2 = pickle.loads(pckl)
@@ -769,7 +935,7 @@ def test_multiprocess():
   from concurrent.futures import ProcessPoolExecutor, as_completed
 
   delete_layer()
-  cv, data = create_layer(size=(128,64,64,1), offset=(0,0,0))
+  cv, _ = create_layer(size=(128,64,64,1), offset=(0,0,0))
   cv.commit_info()
 
   # "The ProcessPoolExecutor class has known (unfixable) 
@@ -777,14 +943,13 @@ def test_multiprocess():
   # for mission critical work."
   # https://pypi.org/project/futures/
 
-  layer = cv.cloudpath
   if sys.version_info[0] < 3:
     print(yellow("External multiprocessing not supported in Python 2."))
     return
   
   futures = []
   with ProcessPoolExecutor(max_workers=4) as ppe:
-    for i in range(0, 5):
+    for _ in range(0, 5):
       futures.append(ppe.submit(cv.refresh_info))
 
     for future in as_completed(futures):
@@ -796,7 +961,7 @@ def test_multiprocess():
 def test_exists():
   # Bbox version
   delete_layer()
-  cv, data = create_layer(size=(128,64,64,1), offset=(0,0,0))
+  cv, _ = create_layer(size=(128,64,64,1), offset=(0,0,0))
 
   defexists = Bbox( (0,0,0), (128,64,64) )
   results = cv.exists(defexists)
@@ -815,7 +980,7 @@ def test_exists():
 
   # Slice version
   delete_layer()
-  cv, data = create_layer(size=(128,64,64,1), offset=(0,0,0))
+  cv, _ = create_layer(size=(128,64,64,1), offset=(0,0,0))
 
   defexists = np.s_[ 0:128, :, : ]
 
@@ -837,7 +1002,7 @@ def test_delete():
 
   # Bbox version
   delete_layer()
-  cv, data = create_layer(size=(128,64,64,1), offset=(0,0,0))
+  cv, _ = create_layer(size=(128,64,64,1), offset=(0,0,0))
 
   defexists = Bbox( (0,0,0), (128,64,64) )
   results = cv.exists(defexists)
@@ -854,7 +1019,7 @@ def test_delete():
 
   # Slice version
   delete_layer()
-  cv, data = create_layer(size=(128,64,64,1), offset=(0,0,0))
+  cv, _ = create_layer(size=(128,64,64,1), offset=(0,0,0))
 
   defexists = np.s_[ 0:128, :, : ]
 
@@ -871,19 +1036,52 @@ def test_delete():
 
   # Check errors
   delete_layer()
-  cv, data = create_layer(size=(128,64,64,1), offset=(0,0,0))
+  cv, _ = create_layer(size=(128,64,64,1), offset=(0,0,0))
 
   try:
     results = cv.exists( np.s_[1:129, :, :] )
-  except ValueError:
+    print(results)
+  except exceptions.OutOfBoundsError:
     pass
   else:
     assert False
 
+def test_delete_black_uploads():
+  for parallel in (1,2):
+    delete_layer()
+    cv, _ = create_layer(size=(256,256,256,1), offset=(0,0,0))
+
+    ls = os.listdir('/tmp/removeme/layer/1_1_1/')
+    assert len(ls) == 64
+
+    cv.parallel = parallel
+    cv.delete_black_uploads = True
+    cv[64:64+128,64:64+128,64:64+128] = 0
+
+    ls = os.listdir('/tmp/removeme/layer/1_1_1/')
+    assert len(ls) == (64 - 8) 
+
+    cv[64:64+128,64:64+128,64:64+128] = 0
+
+    ls = os.listdir('/tmp/removeme/layer/1_1_1/')
+    assert len(ls) == (64 - 8) 
+
+    cv.image.background_color = 1
+    cv[:] = 1 
+    ls = os.listdir('/tmp/removeme/layer/1_1_1/')
+    assert len(ls) == 0
+
+    cv[:] = 0
+    ls = os.listdir('/tmp/removeme/layer/1_1_1/')
+    assert len(ls) == 64
+
+
 def test_transfer():
   # Bbox version
   delete_layer()
-  cv, data = create_layer(size=(128,64,64,1), offset=(0,0,0))
+  cv, _ = create_layer(size=(128,64,64,1), offset=(0,0,0))
+
+  img = cv[:]
 
   cv.transfer_to('file:///tmp/removeme/transfer/', cv.bounds)
 
@@ -895,21 +1093,31 @@ def test_transfer():
   assert os.path.exists('/tmp/removeme/transfer/info')
   assert os.path.exists('/tmp/removeme/transfer/provenance')
 
+  dcv = CloudVolume("file:///tmp/removeme/transfer")
+  dcv.info["dont_touch_me_bro"] = True
+  dcv.commit_info()
+
+  cv.transfer_to('file:///tmp/removeme/transfer/', cv.bounds)
+  dcv.refresh_info()
+
+  assert 'dont_touch_me_bro' in dcv.info
+
+  assert np.all(img == dcv[:])
 
 def test_cdn_cache_control():
   delete_layer()
-  cv, data = create_layer(size=(128,10,10,1), offset=(0,0,0))
+  create_layer(size=(128,10,10,1), offset=(0,0,0))
 
-  assert txrx.cdn_cache_control(None) == 'max-age=3600, s-max-age=3600'
-  assert txrx.cdn_cache_control(0) == 'no-cache'
-  assert txrx.cdn_cache_control(False) == 'no-cache'
-  assert txrx.cdn_cache_control(True) == 'max-age=3600, s-max-age=3600'
+  assert cdn_cache_control(None) == 'max-age=3600, s-max-age=3600'
+  assert cdn_cache_control(0) == 'no-cache'
+  assert cdn_cache_control(False) == 'no-cache'
+  assert cdn_cache_control(True) == 'max-age=3600, s-max-age=3600'
 
-  assert txrx.cdn_cache_control(1337) == 'max-age=1337, s-max-age=1337'
-  assert txrx.cdn_cache_control('private, must-revalidate') == 'private, must-revalidate'
+  assert cdn_cache_control(1337) == 'max-age=1337, s-max-age=1337'
+  assert cdn_cache_control('private, must-revalidate') == 'private, must-revalidate'
 
   try:
-    txrx.cdn_cache_control(-1)
+    cdn_cache_control(-1)
   except ValueError:
     pass
   else:
@@ -976,9 +1184,7 @@ def test_bbox_to_mip():
 
 def test_slices_from_global_coords():
   delete_layer()
-  cv, data = create_layer(size=(1024, 1024, 5, 1), offset=(7,0,0))
-
-  bbox = Bbox( (10, 10, 1), (100, 100, 2) )
+  cv, _ = create_layer(size=(1024, 1024, 5, 1), offset=(7,0,0))
 
   scale = cv.info['scales'][0]
   scale = copy.deepcopy(scale)
@@ -1008,9 +1214,7 @@ def test_slices_from_global_coords():
 
 def test_slices_to_global_coords():
   delete_layer()
-  cv, data = create_layer(size=(1024, 1024, 5, 1), offset=(7,0,0))
-
-  bbox = Bbox( (10, 10, 1), (100, 100, 2) )
+  cv, _ = create_layer(size=(1024, 1024, 5, 1), offset=(7,0,0))
 
   scale = cv.info['scales'][0]
   scale = copy.deepcopy(scale)
@@ -1034,61 +1238,181 @@ def test_slices_to_global_coords():
   result = Bbox.from_slices(slices)
   assert result == Bbox( (100, 100, 1), (500, 512, 2) )
 
+# def test_boss_download():
+#   vol = CloudVolume('gs://seunglab-test/test_v0/image')
+#   bossvol = CloudVolume('boss://automated_testing/test_v0/image')
 
-def test_mesh_fragment_download():
-  vol = CloudVolume('gs://seunglab-test/test_v0/segmentation')
-  frags = vol.mesh._get_raw_frags(18)
-  assert len(frags) == 1
-  assert len(frags[0]['content']) > 0
-  assert frags[0]['filename'] == os.path.join(vol.info['mesh'], '18:0:0-512_0-512_0-100')
-  assert frags[0]['error'] is None
+#   vimg = vol[:,:,:5]
+#   bimg = bossvol[:,:,:5]
 
-  frags = vol.mesh._get_raw_frags(147)
-  assert len(frags) == 1
-  assert len(frags[0]['content']) > 0
-  assert frags[0]['filename'] == os.path.join(vol.info['mesh'], '147:0:0-512_0-512_0-100')
-  assert frags[0]['error'] is None
+#   assert np.all(bimg == vimg)
+#   assert bimg.dtype == vimg.dtype
 
+#   vol.bounded = False
+#   vol.fill_missing = True
+#   bossvol.bounded = False
+#   bossvol.fill_missing = True
 
-def test_get_mesh():
-  vol = CloudVolume('gs://seunglab-test/test_v0/segmentation')
-  mesh = vol.mesh.get(18)
-  assert mesh['num_vertices'] == 6123
-  assert len(mesh['vertices']) == 6123
-  assert len(mesh['faces']) == 36726
-  
+#   assert np.all(vol[-100:100,-100:100,-10:10] == bossvol[-100:100,-100:100,-10:10])
+
+#   # BOSS using a different algorithm for creating downsamples
+#   # so hard to compare 1:1 w/ pixels.
+#   bossvol.bounded = True
+#   bossvol.fill_missing = False
+#   bossvol.mip = 1
+#   bimg = bossvol[:,:,5:6]
+#   assert np.any(bimg > 0)
+
+def test_redirects():
+  info = CloudVolume.create_new_info(
+    num_channels=1, # Increase this number when we add more tests for RGB
+    layer_type='image', 
+    data_type='uint8', 
+    encoding='raw',
+    resolution=[ 1,1,1 ], 
+    voxel_offset=[0,0,0], 
+    volume_size=[128,128,64],
+    mesh='mesh', 
+    chunk_size=[ 64,64,64 ],
+  )
+
+  vol = CloudVolume('file:///tmp/cloudvolume/redirects_0', mip=0, info=info)
+  vol.commit_info()
+  vol.refresh_info()
+
+  vol.info['redirect'] = 'file:///tmp/cloudvolume/redirects_0'
+  vol.commit_info()
+  vol.refresh_info()
+
+  del vol.info['redirect']
+
+  for i in range(0, 10):
+    info['redirect'] = 'file:///tmp/cloudvolume/redirects_' + str(i + 1)  
+    vol = CloudVolume('file:///tmp/cloudvolume/redirects_' + str(i), mip=0, info=info)
+    vol.commit_info()
+  else:
+    del vol.info['redirect']
+    vol.commit_info()
+
+  vol = CloudVolume('file:///tmp/cloudvolume/redirects_0', mip=0)
+
+  assert vol.cloudpath == 'file:///tmp/cloudvolume/redirects_9'
+
+  info['redirect'] = 'file:///tmp/cloudvolume/redirects_10'
+  vol = CloudVolume('file:///tmp/cloudvolume/redirects_9', mip=0, info=info)
+  vol.commit_info()
+
   try:
-    vol.mesh.get(666666666)
-    assert False
-  except ValueError:
+    CloudVolume('file:///tmp/cloudvolume/redirects_0', mip=0)  
+    assert False 
+  except exceptions.TooManyRedirects:
     pass
 
-def test_boss_download():
-  vol = CloudVolume('gs://seunglab-test/test_v0/image')
-  bossvol = CloudVolume('boss://automated_testing/test_v0/image')
+  vol = CloudVolume('file:///tmp/cloudvolume/redirects_9', max_redirects=0)
+  del vol.info['redirect']
+  vol.commit_info()
 
-  vimg = vol[:,:,:5]
-  bimg = bossvol[:,:,:5]
+  vol = CloudVolume('file:///tmp/cloudvolume/redirects_5', max_redirects=0)  
+  vol.info['redirect'] = 'file:///tmp/cloudvolume/redirects_1'
+  vol.commit_info()
 
-  assert np.all(bimg == vimg)
-  assert bimg.dtype == vimg.dtype
+  try:
+    vol = CloudVolume('file:///tmp/cloudvolume/redirects_5')
+    assert False
+  except exceptions.CyclicRedirect:
+    pass
 
-  vol.bounded = False
-  vol.fill_missing = True
-  bossvol.bounded = False
-  bossvol.fill_missing = True
+  vol.info['redirect'] = 'file:///tmp/cloudvolume/redirects_6'
+  vol.commit_info()
 
-  assert np.all(vol[-100:100,-100:100,-10:10] == bossvol[-100:100,-100:100,-10:10])
+  vol = CloudVolume('file:///tmp/cloudvolume/redirects_1')
 
-  # BOSS using a different algorithm for creating downsamples
-  # so hard to compare 1:1 w/ pixels.
-  bossvol.bounded = True
-  bossvol.fill_missing = False
-  bossvol.mip = 1
-  bimg = bossvol[:,:,5:6]
-  assert np.any(bimg > 0)
+  try:
+    vol[:,:,:] = 1
+    assert False 
+  except exceptions.ReadOnlyException:
+    pass
 
-
+  for i in range(0, 10):
+    delete_layer('/tmp/cloudvolume/redirects_' + str(i))  
   
+@pytest.mark.parametrize("compress_method", ('', None, True, False, 'gzip', 'br'))
+def test_compression_methods(compress_method):
+  path = "file:///tmp/cloudvolume/test" + '-' + str(TEST_NUMBER)
 
 
+  # create a NG volume
+  info = CloudVolume.create_new_info(
+      num_channels=1,
+      layer_type="image",
+      data_type="uint16",  # Channel images might be 'uint8'
+      encoding="raw",  # raw, jpeg, compressed_segmentation, fpzip, kempressed
+      resolution=[4, 4, 40],  # Voxel scaling, units are in nanometers
+      voxel_offset=[0, 0, 0],  # x,y,z offset in voxels from the origin
+      chunk_size=[512, 512, 16],  # units are voxels
+      volume_size=[512 * 4, 512 * 4, 16 * 40],  
+  )
+  vol = CloudVolume(path, info=info, compress=compress_method)
+  vol.commit_info()
+
+  image = np.random.randint(low=0, high=2 ** 16 - 1, size=(512, 512, 16, 1), dtype="uint16")
+
+  vol[0:512, 0:512, 0:16] = image
+
+  image_test = vol[0:512, 0:512, 0:16]
+  
+  delete_layer('/tmp/cloudvolume/test' + '-' + str(TEST_NUMBER))
+
+  assert vol.compress == compress_method
+  assert np.array_equal(image_test, image)
+
+def test_mip_locking():
+  delete_layer()
+  cv, _ = create_layer(size=(1024, 1024, 2, 1), offset=(0,0,0))
+
+  cv.meta.lock_mips(0)
+  cv.meta.lock_mips([0])
+
+  try:
+    cv[:,:,:] = 0
+    assert False 
+  except ReadOnlyException:
+    pass 
+
+  cv.meta.unlock_mips(0)
+  cv.meta.unlock_mips([0])
+
+  cv[:,:,:] = 0
+
+  try:
+    cv.meta.lock_mips(1)
+    assert False 
+  except ValueError:
+    pass 
+
+  try:
+    cv.meta.unlock_mips(1)
+    assert False 
+  except ValueError:
+    pass 
+
+  cv.add_scale((2,2,1))
+  cv.commit_info()
+  cv.mip = 1 
+  cv[:] = 1
+
+  cv.meta.lock_mips([0,1])
+
+  try:
+    cv[:,:,:] = 1
+    assert False 
+  except ReadOnlyException:
+    pass 
+
+  cv.mip = 0
+
+  try:
+    cv[:,:,:] = 1
+    assert False 
+  except ReadOnlyException:
+    pass 

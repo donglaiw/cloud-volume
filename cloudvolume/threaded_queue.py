@@ -8,6 +8,8 @@ import time
 
 from tqdm import tqdm
 
+DEFAULT_THREADS = 20
+
 class ThreadedQueue(object):
   """Grant threaded task processing to any derived class."""
   def __init__(self, n_threads, queue_size=0, progress=None):
@@ -88,7 +90,7 @@ class ThreadedQueue(object):
 
   def are_threads_alive(self):
     """Returns: boolean indicating if any threads are alive"""
-    return any(map(lambda t: t.isAlive(), self._threads))
+    return any(map(lambda t: t.is_alive(), self._threads))
 
   def kill_threads(self):
     """Kill all threads."""

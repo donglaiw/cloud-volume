@@ -8,7 +8,12 @@ from google.oauth2 import service_account
 
 from .lib import mkdir, colorize
 
-CLOUD_VOLUME_DIR = mkdir(os.path.join(os.environ['HOME'], '.cloudvolume'))
+HOME = os.path.expanduser('~')
+CLOUD_VOLUME_DIR = os.path.join(HOME, '.cloudvolume')
+try:
+  mkdir(CLOUD_VOLUME_DIR)
+except PermissionError: # allow operation in read-only mode
+  pass
 
 def secretpath(filepath):
   preferred = os.path.join(CLOUD_VOLUME_DIR, filepath)
@@ -17,7 +22,7 @@ def secretpath(filepath):
     return preferred
 
   backcompat = [
-    os.path.join(os.environ['HOME'], '.neuroglancer'), # older
+    os.path.join(HOME, '.neuroglancer'), # older
     '/' # original
   ]
 
@@ -80,10 +85,11 @@ def google_credentials(bucket = ''):
         project_name = json.loads(f.read())['project_id']
       break
 
-  GOOGLE_CREDENTIALS_CACHE[bucket] = (project_name, google_credentials)
-
   if google_credentials == None:
     print(colorize('yellow', 'Using default Google credentials. There is no ~/.cloudvolume/secrets/google-secret.json set.'))  
+  else:
+    GOOGLE_CREDENTIALS_CACHE[bucket] = (project_name, google_credentials)
+
   return project_name, google_credentials
 
 AWS_CREDENTIALS_CACHE = defaultdict(dict)
@@ -106,13 +112,23 @@ def aws_credentials(bucket = '', service = 'aws'):
   if bucket:
     paths = [ secretpath('secrets/{}-{}-secret.json'.format(bucket, service)) ] + paths
 
-  aws_credentials = ''
+  aws_credentials = {}
   aws_credentials_path = secretpath(default_file_path)
   for aws_credentials_path in paths:
     if os.path.exists(aws_credentials_path):
       with open(aws_credentials_path, 'r') as f:
         aws_credentials = json.loads(f.read())
       break
+  
+  if not aws_credentials:
+    # did not find any secret json file, will try to find it in environment variables
+    if 'AWS_ACCESS_KEY_ID' in os.environ and 'AWS_SECRET_ACCESS_KEY' in os.environ:
+      aws_credentials = {
+        'AWS_ACCESS_KEY_ID': os.environ['AWS_ACCESS_KEY_ID'],
+        'AWS_SECRET_ACCESS_KEY': os.environ['AWS_SECRET_ACCESS_KEY'],
+      }
+    if 'AWS_DEFAULT_REGION' in os.environ:
+      aws_credentials['AWS_DEFAULT_REGION'] = os.environ['AWS_DEFAULT_REGION']
 
   AWS_CREDENTIALS_CACHE[service][bucket] = aws_credentials
   return aws_credentials
@@ -124,3 +140,11 @@ if os.path.exists(boss_credentials_path):
     boss_credentials = json.loads(f.read())
 else:
   boss_credentials = ''
+
+
+chunkedgraph_credentials_path = secretpath('secrets/chunkedgraph-secret.json')
+if os.path.exists(chunkedgraph_credentials_path):
+  with open(chunkedgraph_credentials_path, 'r') as f:
+    chunkedgraph_credentials = json.loads(f.read())
+else:
+  chunkedgraph_credentials = None
