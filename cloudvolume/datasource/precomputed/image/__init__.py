@@ -235,7 +235,7 @@ class PrecomputedImageSource(ImageSourceInterface):
     cloudpaths = chunknames(
       realized_bbox, self.meta.bounds(mip), 
       self.meta.key(mip), self.meta.chunk_size(mip),
-      protocol=self.meta.path.protocol
+      protocol=self.meta.path.protocol, name_sep = self.meta.name_sep
     )
 
     return CloudFiles(
@@ -270,7 +270,7 @@ class PrecomputedImageSource(ImageSourceInterface):
     cloudpaths = lambda: chunknames(
       realized_bbox, self.meta.bounds(mip),
       self.meta.key(mip), self.meta.chunk_size(mip),
-      protocol=self.meta.path.protocol
+      protocol=self.meta.path.protocol, name_sep = self.meta.name_sep
     ) # need to regenerate so that generator isn't used up
 
     CloudFiles(self.meta.cloudpath, progress=self.config.progress, secrets=self.config.secrets) \
@@ -347,7 +347,7 @@ class PrecomputedImageSource(ImageSourceInterface):
     cloudpaths = chunknames(
       bbox, self.meta.bounds(mip), 
       self.meta.key(mip), self.meta.chunk_size(mip),
-      protocol=self.meta.path.protocol
+      protocol=self.meta.path.protocol, name_sep = self.meta.name_sep
     )
 
     pbar = tqdm(

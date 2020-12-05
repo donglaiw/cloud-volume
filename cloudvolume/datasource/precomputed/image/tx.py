@@ -104,8 +104,8 @@ def upload(
     )
 
   # Download the shell, paint, and upload
-  all_chunks = set(chunknames(expanded, meta.bounds(mip), meta.key(mip), meta.chunk_size(mip)))
-  core_chunks = set(chunknames(retracted, meta.bounds(mip), meta.key(mip), meta.chunk_size(mip)))
+  all_chunks = set(chunknames(expanded, meta.bounds(mip), meta.key(mip), meta.chunk_size(mip), name_sep=meta.name_sep))
+  core_chunks = set(chunknames(retracted, meta.bounds(mip), meta.key(mip), meta.chunk_size(mip), name_sep=meta.name_sep))
   shell_chunks = all_chunks.difference(core_chunks)
 
   def shade_and_upload(img3d, bbox):
@@ -315,7 +315,7 @@ def threaded_upload_chunks(
     newept = clamp_ept - spt
     imgchunk = imgchunk[ :newept.x, :newept.y, :newept.z, : ]
 
-    filename = "{}-{}_{}-{}_{}-{}".format(
+    filename = ("{}-{}%s{}-{}%s{}-{}" % (meta.name_sep, meta.name_sep)).format(
       spt.x, clamp_ept.x,
       spt.y, clamp_ept.y, 
       spt.z, clamp_ept.z

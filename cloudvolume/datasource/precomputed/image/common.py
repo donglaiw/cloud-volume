@@ -36,12 +36,12 @@ def parallel_execution(fn, items, parallel, cleanup_shm=None):
   signal.signal(signal.SIGINT, prevsigint)
   signal.signal(signal.SIGTERM, prevsigterm)
 
-def chunknames(bbox, volume_bbox, key, chunk_size, protocol=None):
+def chunknames(bbox, volume_bbox, key, chunk_size, protocol=None, name_sep = '_'):
   path = posixpath if protocol != 'file' else os.path
 
   for x,y,z in xyzrange( bbox.minpt, bbox.maxpt, chunk_size ):
     highpt = min2(Vec(x,y,z) + chunk_size, volume_bbox.maxpt)
-    filename = "{}-{}_{}-{}_{}-{}".format(
+    filename = ("{}-{}%s{}-{}%s{}-{}" % (name_sep, name_sep)).format(
       x, highpt.x,
       y, highpt.y, 
       z, highpt.z
