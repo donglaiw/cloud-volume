@@ -297,6 +297,7 @@ def floating(lst):
   return any(( isinstance(x, float) for x in lst ))
 
 FILENAME_RE = re.compile(r'(-?\d+)-(-?\d+)_(-?\d+)-(-?\d+)_(-?\d+)-(-?\d+)(?:\.gz|\.br)?$')
+FILENAME_RE2 = re.compile(r'(-?\d+)-(-?\d+)/(-?\d+)-(-?\d+)/(-?\d+)-(-?\d+)(?:\.gz|\.br)?$')
 
 class Bbox(object):
   __slots__ = [ 'minpt', 'maxpt', '_dtype' ]
@@ -397,7 +398,11 @@ class Bbox(object):
 
   @classmethod
   def from_filename(cls, filename, dtype=int):
-    match = FILENAME_RE.search(os.path.basename(filename))
+    if filename.count('/') > 1:
+        # for subdir
+        match = FILENAME_RE2.search(filename[filename.find('/')+1:])
+    else:
+        match = FILENAME_RE.search(os.path.basename(filename))
 
     if match is None:
       raise ValueError("Unable to decode bounding box from: " + str(filename))
