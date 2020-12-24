@@ -74,9 +74,7 @@ class FileInterface(StorageInterface):
     if compress == "br":
       path += ".br"
     elif compress:
-      # path += '.gz'
-      import pdb; pdb.set_trace()
-      pass
+      path += '.gz'
 
     if content \
       and content_type \

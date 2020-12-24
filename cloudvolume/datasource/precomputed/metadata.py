@@ -50,6 +50,7 @@ class PrecomputedMetadata(object):
 
     self.redirected_from = []
     self.use_https = use_https
+    self.name_sep = '_'
 
     if info is None:
       self.refresh_info(max_redirects=max_redirects)

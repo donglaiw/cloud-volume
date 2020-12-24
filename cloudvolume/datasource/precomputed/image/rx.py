@@ -2,7 +2,6 @@ from functools import partial
 import itertools
 import math
 import os
-import re 
 
 import numpy as np
 from six.moves import range
@@ -268,6 +267,7 @@ def download_chunk(
 
   if content is not None:
     content = compression.decompress(content, file['compress'])
+
   bbox = Bbox.from_filename(filename) # possible off by one error w/ exclusive bounds
   img3d = decode(meta, filename, content, fill_missing, mip)
   return img3d, bbox
