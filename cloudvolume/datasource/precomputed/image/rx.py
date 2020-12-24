@@ -327,7 +327,8 @@ def decode(meta, input_bbox, content, fill_missing, mip):
     if fill_missing:
       content = b''
     else:
-      raise EmptyVolumeException(input_bbox)
+      #raise EmptyVolumeException(input_bbox)
+      print('empty volume', input_bbox)
 
   shape = list(bbox.size3()) + [ meta.num_channels ]
 
